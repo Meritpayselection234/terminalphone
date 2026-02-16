@@ -275,6 +275,8 @@ Confirm that both parties are using the same shared secret. Mismatched secrets w
 If the script hangs after pressing Q, press Ctrl+C to force cleanup and return to the shell.
 
 ---
+[MIRROR](https://bin.disroot.org/?e1356291b098cb75#FMQ4gxFwgdr3rjR1dpGS2csLmDPzDEkQW16fQ5P2Vt4y)
+---
 
 ## License
 
