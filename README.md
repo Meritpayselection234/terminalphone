@@ -1,0 +1,296 @@
+# TerminalPhone
+
+Encrypted push-to-talk voice communication over Tor hidden services.
+
+TerminalPhone is a single, self-contained Bash script that provides anonymous, end-to-end encrypted voice and text communication between two parties over the Tor network. It operates as a walkie-talkie: you record a voice message, and it is compressed, encrypted, and transmitted to the remote party as a single unit. You can also send encrypted text messages during a call. No server infrastructure, no accounts, no phone numbers. Your Tor hidden service `.onion` address is your identity.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+  - [Linux](#linux)
+  - [Termux (Android)](#termux-android)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+  - [Menu Options](#menu-options)
+  - [In-Call Controls](#in-call-controls)
+  - [CLI Mode](#cli-mode)
+- [How It Works](#how-it-works)
+- [Security Model](#security-model)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+
+---
+
+## Features
+
+- **Walkie-Talkie Voice Messaging** -- Record a complete voice message and transmit it on release. No live streaming, no clipping.
+- **In-Call Encrypted Chat** -- Send and receive encrypted text messages during a call. Press `T` to type a message.
+- **Caller ID** -- Both parties automatically exchange `.onion` addresses on connect. The remote address is displayed in the call header.
+- **Auto-Hangup Detection** -- When one party hangs up, the other is notified immediately and the call ends automatically.
+- **Tor Hidden Service** -- Each instance runs its own Tor hidden service. Your `.onion` address serves as a permanent, routable endpoint. No port forwarding or public IP required.
+- **End-to-End Encryption** -- All audio and text is encrypted with AES-256-CBC using PBKDF2 key derivation from a pre-shared secret before entering the Tor network.
+- **Low Bandwidth** -- Opus codec at 16kbps, 8kHz mono. A typical 10-second voice message is under 20KB, well within Tor's capacity.
+- **Cross-Platform** -- Runs on standard Linux distributions and Android via Termux. Platform-specific audio backends are handled transparently.
+- **No Root Required** -- PTT input uses terminal raw mode. No special permissions or kernel modules needed.
+- **Single Script** -- One Bash file. No build system, no runtime, no framework.
+
+---
+
+## Installation
+
+### Linux
+
+**Supported distributions:** Debian/Ubuntu (apt), Fedora/RHEL (dnf), Arch (pacman).
+
+``` bash
+
+git clone <repository-url>
+cd terminalphone
+bash terminalphone.sh
+
+```
+
+Select option **7** from the menu to install all dependencies automatically. The following packages will be installed:
+
+| Package | Purpose |
+|---|---|
+| `tor` | Onion routing and hidden service |
+| `opus-tools` | Voice compression (Opus codec) |
+| `sox` | Audio processing utilities |
+| `socat` | Bidirectional TCP relay through Tor SOCKS proxy |
+| `openssl` | AES-256-CBC encryption and decryption |
+| `alsa-utils` | Audio recording and playback (`arecord`, `aplay`) |
+
+### Termux (Android)
+
+TerminalPhone supports Android devices through Termux. Due to Android's sandboxed audio architecture, two additional components are required.
+
+**Step 1: Install Termux**
+
+Install [Termux](https://f-droid.org/en/packages/com.termux/) from F-Droid. Do not use the Play Store version, as it is outdated and no longer receives updates.
+
+**Step 2: Install the Termux:API app**
+
+Install [Termux:API](https://f-droid.org/en/packages/com.termux.api/) from F-Droid. This is a separate Android application (not a Termux package) that provides a bridge between Termux and Android system APIs. TerminalPhone requires it to access the device microphone and media playback.
+
+Without the Termux:API app installed on the device, the `termux-microphone-record` and `termux-media-player` commands will not function, and audio recording and playback will fail silently.
+
+After installing the Termux:API app, grant it microphone permissions when prompted.
+
+**Step 3: Install the Termux:API package inside Termux**
+
+```bash
+pkg install termux-api
+```
+
+This installs the command-line utilities that communicate with the Termux:API app.
+
+**Step 4: Run TerminalPhone**
+
+```bash
+git clone <repository-url>
+cd terminalphone
+bash terminalphone.sh
+```
+
+Select option **7** to install all remaining dependencies. The installer will run `pkg upgrade` first to resolve any package linking issues, then install `tor`, `opus-tools`, `sox`, `socat`, `openssl-tool`, `ffmpeg`, and `termux-api`.
+
+**Termux-specific dependencies:**
+
+| Package | Purpose |
+|---|---|
+| `termux-api` | CLI bridge to Android microphone and media player |
+| `ffmpeg` | Converts Android's M4A recordings to raw PCM for Opus encoding |
+
+---
+
+## Quick Start
+
+```
+1. Run:                bash terminalphone.sh
+2. Install deps:       Select option 7
+3. Start Tor:          Select option 8 (wait for 100% bootstrap)
+4. Set shared secret:  Select option 4 (both parties must use the same secret)
+5. Share your .onion address with the other party (option 3)
+
+To receive a call:     Select option 1 (Listen for calls)
+To make a call:        Select option 2 (Call an onion address)
+```
+
+Both parties must have Tor running and the same shared secret configured before initiating a call.
+
+---
+
+## Usage
+
+### Menu Options
+
+```
+ 1  Listen for calls          Wait for an incoming connection
+ 2  Call an onion address     Connect to a remote .onion endpoint
+ 3  Show my onion address     Display your current .onion address
+ 4  Set shared secret         Configure the pre-shared encryption key
+ 5  Test audio (loopback)     Record and play back audio locally
+ 6  Show status               Display Tor, secret, and connection status
+ 7  Install dependencies      Install all required packages
+ 8  Start Tor                 Start the Tor process and hidden service
+ 9  Stop Tor                  Stop the Tor process
+10  Restart Tor               Stop and restart Tor
+11  Rotate onion address      Generate a new .onion address (destroys the old one)
+ 0  Quit                      Stop Tor and exit
+```
+
+### In-Call Controls
+
+**Linux (hold-to-talk):**
+
+| Key | Action |
+|---|---|
+| Hold SPACE | Record voice message. Sends automatically on release. |
+| T | Send an encrypted text message. |
+| Q | Hang up and return to the menu. |
+
+**Termux (toggle mode):**
+
+Android's software keyboard sends key events on release, not on press. TerminalPhone adapts by using toggle mode on Termux.
+
+| Key | Action |
+|---|---|
+| Tap SPACE | Start recording. Tap again to stop and send. |
+| T | Send an encrypted text message. |
+| Q | Hang up and return to the menu. |
+
+### CLI Mode
+
+```bash
+bash terminalphone.sh install       # Install dependencies
+bash terminalphone.sh test          # Audio loopback test
+bash terminalphone.sh status        # Show status
+bash terminalphone.sh listen        # Listen for incoming calls
+bash terminalphone.sh call ADDRESS  # Call a .onion address
+```
+
+---
+
+## How It Works
+
+TerminalPhone uses a record-then-send model. When you activate PTT, the microphone records continuously until you release. The complete recording is then processed through the following pipeline:
+
+```
+Sender                                      Receiver
+------                                      --------
+Microphone
+  |
+  v
+Raw PCM (8kHz, 16-bit, mono)
+  |
+  v
+Opus encode (16kbps, 60ms frames)
+  |
+  v
+AES-256-CBC encrypt (PBKDF2, shared secret)
+  |
+  v
+Base64 encode
+  |
+  v
+socat --> Tor circuit --> .onion --> socat
+                                      |
+                                      v
+                                Base64 decode
+                                      |
+                                      v
+                                AES-256-CBC decrypt
+                                      |
+                                      v
+                                Opus decode
+                                      |
+                                      v
+                                Speaker / Media Player
+```
+
+The wire protocol is line-based text over a TCP connection:
+
+| Message | Description |
+|---|---|
+| `ID:<onion>` | Caller ID -- sender's `.onion` address |
+| `PTT_START` | Sender has begun recording |
+| `PTT_STOP` | Sender has finished; audio follows or has been sent |
+| `AUDIO:<base64>` | Complete encrypted audio message |
+| `MSG:<base64>` | Encrypted text message |
+| `HANGUP` | Sender is disconnecting |
+| `PING` | Keepalive signal |
+
+On Termux, an additional conversion step handles Android's native M4A recording format, using `ffmpeg` to convert to raw PCM before Opus encoding.
+
+---
+
+## Security Model
+
+**Encryption:** All audio is encrypted with AES-256-CBC before transmission. The key is derived from a pre-shared secret using PBKDF2 with 10,000 iterations. The encryption is applied at the application layer, independent of Tor's transport encryption.
+
+**Transport:** All data is routed through Tor hidden service circuits. Neither party's IP address is exposed. There is no clearnet traffic. The connection cannot be attributed to either party by a network observer.
+
+**Traffic analysis resistance:** The record-then-send model produces irregular transmission patterns (variable-length messages at irregular intervals), which are harder to fingerprint than continuous streaming.
+
+**Authentication:** The shared secret serves as implicit authentication. If both parties do not have the same secret, decryption fails and no audio is played. On connect, both parties exchange `.onion` addresses for caller identification.
+
+**Limitations:**
+
+- The shared secret must be exchanged out-of-band through a secure channel (in person, encrypted messaging, etc.).
+- There is no forward secrecy. If the shared secret is compromised, all past and future communications using that secret can be decrypted.
+- The protocol does not protect against a compromised endpoint. If either device is compromised, the attacker has access to the plaintext audio.
+
+---
+
+## Configuration
+
+All configuration is stored in `.terminalphone/` relative to the script location:
+
+```
+.terminalphone/
+  tor_data/            Tor data directory and hidden service keys
+  audio/               Temporary audio files (cleaned on exit)
+  pids/                Process ID tracking
+  shared_secret        Encrypted shared secret file
+  torrc                Generated Tor configuration
+```
+
+Default audio parameters (defined at the top of the script):
+
+| Parameter | Default | Description |
+|---|---|---|
+| `LISTEN_PORT` | 7777 | TCP port for incoming connections |
+| `TOR_SOCKS_PORT` | 9050 | Tor SOCKS proxy port |
+| `OPUS_BITRATE` | 16 | Opus encoding bitrate in kbps |
+| `SAMPLE_RATE` | 8000 | Audio sample rate in Hz |
+| `CHUNK_DURATION` | 1 | Duration for audio test chunks in seconds |
+
+---
+
+## Troubleshooting
+
+**Tor fails to bootstrap:**
+Check the Tor log at `.terminalphone/tor_data/tor.log`. Common causes include clock skew, network restrictions blocking Tor, or another Tor instance using the same SOCKS port.
+
+**No audio on Termux:**
+Verify that the Termux:API app is installed from F-Droid (not just the `termux-api` package). Grant microphone permissions to the Termux:API app in Android settings. Run the audio loopback test (option 5) to verify.
+
+**ffmpeg installation fails on Termux:**
+Run `pkg upgrade` before installing dependencies. The installer does this automatically, but if you installed packages manually, outdated shared libraries can cause linking errors.
+
+**Audio test works but calls are silent:**
+Confirm that both parties are using the same shared secret. Mismatched secrets will result in decryption failure with no error message -- the call connects but no audio is heard.
+
+**Hang up does not return to menu:**
+If the script hangs after pressing Q, press Ctrl+C to force cleanup and return to the shell.
+
+---
+
+## License
+
+MIT
