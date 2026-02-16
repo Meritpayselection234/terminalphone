@@ -48,7 +48,7 @@ TerminalPhone is a single, self-contained Bash script that provides anonymous, e
 
 ``` bash
 
-git clone <https://github.com/terminalphone/terminalphone.git>
+git clone https://gitlab.com/here_forawhile/terminalphone.git
 cd terminalphone
 bash terminalphone.sh
 
