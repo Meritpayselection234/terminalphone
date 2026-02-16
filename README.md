@@ -92,7 +92,7 @@ This installs the command-line utilities that communicate with the Termux:API ap
 **Step 4: Run TerminalPhone**
 
 ```bash
-git clone <repository-url>
+git clone <https://gitlab.com/here_forawhile/terminalphone.git>
 cd terminalphone
 bash terminalphone.sh
 ```
