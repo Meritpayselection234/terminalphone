@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIGURATION
 #=============================================================================
 APP_NAME="TerminalPhone"
-VERSION="1.0.1"
+VERSION="1.0.2"
 BASE_DIR="$(dirname "$(readlink -f "$0")")"
 DATA_DIR="$BASE_DIR/.terminalphone"
 TOR_DIR="$DATA_DIR/tor_data"
@@ -49,7 +49,6 @@ BLINK='\033[5m'
 NC='\033[0m' # No Color
 BG_RED='\033[41m'
 BG_GREEN='\033[42m'
-BG_BLUE='\033[44m'
 TOR_PURPLE='\033[38;2;125;70;152m'
 
 # Platform detection
@@ -60,7 +59,6 @@ fi
 
 # State
 TOR_PID=""
-LISTENER_PID=""
 CALL_ACTIVE=0
 ORIGINAL_STTY=""
 
@@ -567,26 +565,7 @@ audio_play() {
     fi
 }
 
-# Record a chunk of audio, encode to opus, return the file path
-record_chunk() {
-    local _id=$(uid)
-    local raw_file="$AUDIO_DIR/rec_${_id}.raw"
-    local opus_file="$AUDIO_DIR/rec_${_id}.opus"
 
-    # Record raw audio
-    audio_record "$raw_file" "$CHUNK_DURATION"
-
-    # Encode to opus
-    if [ -s "$raw_file" ]; then
-        opusenc --raw --raw-rate "$SAMPLE_RATE" --raw-chan 1 \
-            --bitrate "$OPUS_BITRATE" --framesize "$OPUS_FRAMESIZE" \
-            --speech --quiet \
-            "$raw_file" "$opus_file" 2>/dev/null
-    fi
-
-    rm -f "$raw_file"
-    echo "$opus_file"
-}
 
 # Play an opus file
 play_chunk() {
@@ -607,132 +586,7 @@ play_chunk() {
     fi
 }
 
-#=============================================================================
-# PROTOCOL — FRAMED MESSAGES
-#=============================================================================
-# Message format: [1 byte type][4 bytes length (big-endian)][payload]
-# Types: 0x01 = voice data, 0x02 = PTT start, 0x03 = PTT stop, 0x04 = ping, 0x05 = text
 
-PROTO_VOICE=1
-PROTO_PTT_START=2
-PROTO_PTT_STOP=3
-PROTO_PING=4
-PROTO_TEXT=5
-
-# Send a framed message over the connection fd
-send_message() {
-    local msg_type="$1"
-    local payload_file="$2"  # file containing payload, or empty
-    local fd="$3"
-
-    local payload_len=0
-    if [ -n "$payload_file" ] && [ -f "$payload_file" ]; then
-        payload_len=$(stat -c%s "$payload_file" 2>/dev/null || echo 0)
-    fi
-
-    # Write header: type (1 byte) + length (4 bytes big-endian)
-    printf "\\x$(printf '%02x' "$msg_type")" >&"$fd"
-    printf "\\x$(printf '%02x' $(( (payload_len >> 24) & 0xFF )))" >&"$fd"
-    printf "\\x$(printf '%02x' $(( (payload_len >> 16) & 0xFF )))" >&"$fd"
-    printf "\\x$(printf '%02x' $(( (payload_len >> 8) & 0xFF )))" >&"$fd"
-    printf "\\x$(printf '%02x' $(( payload_len & 0xFF )))" >&"$fd"
-
-    # Write payload
-    if [ "$payload_len" -gt 0 ]; then
-        cat "$payload_file" >&"$fd"
-    fi
-}
-
-#=============================================================================
-# CONNECTION HANDLER
-#=============================================================================
-
-# Background process: handle receiving data from remote
-receive_loop() {
-    local conn_fd="$1"
-    mkdir -p "$AUDIO_DIR"
-
-    while [ -f "$CONNECTED_FLAG" ]; do
-        # Read message header (5 bytes: 1 type + 4 length)
-        local header
-        header=$(dd bs=1 count=5 <&"$conn_fd" 2>/dev/null | xxd -p)
-
-        if [ -z "$header" ] || [ ${#header} -lt 10 ]; then
-            sleep 0.1
-            continue
-        fi
-
-        local msg_type=$((16#${header:0:2}))
-        local payload_len=$((16#${header:2:8}))
-
-        case $msg_type in
-            $PROTO_VOICE)
-                if [ "$payload_len" -gt 0 ]; then
-                    local _rid=$(uid)
-                    local enc_file="$AUDIO_DIR/recv_enc_${_rid}.opus"
-                    local dec_file="$AUDIO_DIR/recv_${_rid}.opus"
-                    dd bs=1 count="$payload_len" <&"$conn_fd" > "$enc_file" 2>/dev/null
-                    if decrypt_file "$enc_file" "$dec_file"; then
-                        play_chunk "$dec_file"
-                    fi
-                    rm -f "$enc_file" "$dec_file"
-                fi
-                ;;
-            $PROTO_PTT_START)
-                echo -e "\r${BG_GREEN}${WHITE} ▶ REMOTE SPEAKING ${NC}  " >&2
-                ;;
-            $PROTO_PTT_STOP)
-                echo -e "\r${DIM} ■ Remote idle      ${NC}  " >&2
-                ;;
-            $PROTO_PING)
-                # Respond with ping
-                ;;
-            *)
-                ;;
-        esac
-    done
-}
-
-# Background process: handle sending based on PTT state
-transmit_loop() {
-    local conn_fd="$1"
-    local was_pressed=0
-    mkdir -p "$AUDIO_DIR"
-
-    while [ -f "$CONNECTED_FLAG" ]; do
-        if [ -f "$PTT_FLAG" ]; then
-            if [ $was_pressed -eq 0 ]; then
-                # PTT just pressed — notify remote
-                was_pressed=1
-                local empty_file="$AUDIO_DIR/empty_$(uid)"
-                touch "$empty_file"
-                send_message $PROTO_PTT_START "$empty_file" "$conn_fd" 2>/dev/null || true
-                rm -f "$empty_file"
-            fi
-
-            # Record a chunk, encrypt, and send
-            local opus_file
-            opus_file=$(record_chunk)
-            if [ -f "$opus_file" ]; then
-                local enc_file="$AUDIO_DIR/send_enc_$(uid).opus"
-                if encrypt_file "$opus_file" "$enc_file"; then
-                    send_message $PROTO_VOICE "$enc_file" "$conn_fd" 2>/dev/null || true
-                fi
-                rm -f "$opus_file" "$enc_file"
-            fi
-        else
-            if [ $was_pressed -eq 1 ]; then
-                # PTT just released — notify remote
-                was_pressed=0
-                local empty_file="$AUDIO_DIR/empty_$(uid)"
-                touch "$empty_file"
-                send_message $PROTO_PTT_STOP "$empty_file" "$conn_fd" 2>/dev/null || true
-                rm -f "$empty_file"
-            fi
-            sleep 0.1
-        fi
-    done
-}
 
 #=============================================================================
 # CALL CLEANUP — RESET EVERYTHING TO FRESH STATE
