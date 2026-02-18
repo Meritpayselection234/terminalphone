@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIGURATION
 #=============================================================================
 APP_NAME="TerminalPhone"
-VERSION="1.0.0"
+VERSION="1.0.1"
 BASE_DIR="$(dirname "$(readlink -f "$0")")"
 DATA_DIR="$BASE_DIR/.terminalphone"
 TOR_DIR="$DATA_DIR/tor_data"
@@ -23,6 +23,7 @@ PTT_FLAG="$DATA_DIR/run/ptt_$$"
 CONNECTED_FLAG="$DATA_DIR/run/connected_$$"
 RECV_PIPE="$DATA_DIR/run/recv_$$"
 SEND_PIPE="$DATA_DIR/run/send_$$"
+CIPHER_RUNTIME_FILE="$DATA_DIR/run/cipher_$$"
 
 # Defaults
 LISTEN_PORT=7777
@@ -32,6 +33,7 @@ OPUS_FRAMESIZE=60     # ms
 SAMPLE_RATE=8000      # Hz
 PTT_KEY=" "           # spacebar
 CHUNK_DURATION=1      # seconds per audio chunk
+CIPHER="aes-256-cbc"  # OpenSSL cipher for encryption
 
 # ANSI Colors
 RED='\033[0;31m'
@@ -152,7 +154,9 @@ save_config() {
 LISTEN_PORT=$LISTEN_PORT
 TOR_SOCKS_PORT=$TOR_SOCKS_PORT
 OPUS_BITRATE=$OPUS_BITRATE
+OPUS_FRAMESIZE=$OPUS_FRAMESIZE
 PTT_KEY="$PTT_KEY"
+CIPHER="$CIPHER"
 EOF
 }
 
@@ -422,25 +426,33 @@ set_shared_secret() {
 
 # Encrypt stdin to stdout
 encrypt_stream() {
-    openssl enc -aes-256-cbc -pbkdf2 -iter 10000 -pass "pass:${SHARED_SECRET}" -nosalt 2>/dev/null
+    local c="$CIPHER"
+    [ -f "$CIPHER_RUNTIME_FILE" ] && c=$(cat "$CIPHER_RUNTIME_FILE")
+    openssl enc -"${c}" -pbkdf2 -iter 10000 -pass "pass:${SHARED_SECRET}" -nosalt 2>/dev/null
 }
 
 # Decrypt stdin to stdout
 decrypt_stream() {
-    openssl enc -d -aes-256-cbc -pbkdf2 -iter 10000 -pass "pass:${SHARED_SECRET}" -nosalt 2>/dev/null
+    local c="$CIPHER"
+    [ -f "$CIPHER_RUNTIME_FILE" ] && c=$(cat "$CIPHER_RUNTIME_FILE")
+    openssl enc -d -"${c}" -pbkdf2 -iter 10000 -pass "pass:${SHARED_SECRET}" -nosalt 2>/dev/null
 }
 
 # Encrypt a file
 encrypt_file() {
     local infile="$1" outfile="$2"
-    openssl enc -aes-256-cbc -pbkdf2 -iter 10000 -pass "pass:${SHARED_SECRET}" \
+    local c="$CIPHER"
+    [ -f "$CIPHER_RUNTIME_FILE" ] && c=$(cat "$CIPHER_RUNTIME_FILE")
+    openssl enc -"${c}" -pbkdf2 -iter 10000 -pass "pass:${SHARED_SECRET}" \
         -in "$infile" -out "$outfile" 2>/dev/null
 }
 
 # Decrypt a file
 decrypt_file() {
     local infile="$1" outfile="$2"
-    openssl enc -d -aes-256-cbc -pbkdf2 -iter 10000 -pass "pass:${SHARED_SECRET}" \
+    local c="$CIPHER"
+    [ -f "$CIPHER_RUNTIME_FILE" ] && c=$(cat "$CIPHER_RUNTIME_FILE")
+    openssl enc -d -"${c}" -pbkdf2 -iter 10000 -pass "pass:${SHARED_SECRET}" \
         -in "$infile" -out "$outfile" 2>/dev/null
 }
 
@@ -722,6 +734,61 @@ transmit_loop() {
     done
 }
 
+#=============================================================================
+# CALL CLEANUP — RESET EVERYTHING TO FRESH STATE
+#=============================================================================
+
+cleanup_call() {
+    # Restore terminal to sane state
+    if [ -n "$ORIGINAL_STTY" ]; then
+        stty "$ORIGINAL_STTY" 2>/dev/null || true
+    fi
+    stty sane 2>/dev/null || true
+    ORIGINAL_STTY=""
+
+    # Close pipe file descriptors to unblock any blocking reads
+    exec 3<&- 2>/dev/null || true
+    exec 4>&- 2>/dev/null || true
+
+    # Kill all call-related processes by PID files
+    for pidfile in "$PID_DIR"/socat.pid "$PID_DIR"/socat_call.pid "$PID_DIR"/recv_loop.pid; do
+        if [ -f "$pidfile" ]; then
+            local pid
+            pid=$(cat "$pidfile" 2>/dev/null)
+            if [ -n "$pid" ]; then
+                kill "$pid" 2>/dev/null || true
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+            rm -f "$pidfile"
+        fi
+    done
+
+    # Kill recording process if active
+    if [ -n "$REC_PID" ]; then
+        kill "$REC_PID" 2>/dev/null || true
+        kill -9 "$REC_PID" 2>/dev/null || true
+        REC_PID=""
+    fi
+
+    # Wait briefly for processes to die
+    sleep 0.2
+
+    # Remove all runtime files for this PID
+    rm -f "$PTT_FLAG" "$CONNECTED_FLAG"
+    rm -f "$RECV_PIPE" "$SEND_PIPE"
+    rm -f "$CIPHER_RUNTIME_FILE"
+    rm -f "$DATA_DIR/run/remote_id_$$"
+    rm -f "$DATA_DIR/run/remote_cipher_$$"
+    rm -f "$DATA_DIR/run/incoming_$$"
+
+    # Clean temp audio files
+    rm -f "$AUDIO_DIR"/*.opus "$AUDIO_DIR"/*.bin "$AUDIO_DIR"/*.txt "$AUDIO_DIR"/*.wav 2>/dev/null || true
+
+    # Reset state variables
+    CALL_ACTIVE=0
+    REC_PID=""
+}
+
 # Start listening for incoming calls
 listen_for_call() {
     if [ -z "$SHARED_SECRET" ]; then
@@ -772,9 +839,8 @@ listen_for_call() {
     log_ok "Call connected!"
     in_call_session "$RECV_PIPE" "$SEND_PIPE" ""
 
-    # Cleanup after call ends
-    kill "$socat_pid" 2>/dev/null || true
-    rm -f "$CONNECTED_FLAG" "$RECV_PIPE" "$SEND_PIPE" "$incoming_flag"
+    # Full cleanup after call ends
+    cleanup_call
 }
 
 # Call a remote .onion address
@@ -825,12 +891,49 @@ call_remote() {
         log_err "Failed to connect. Check the address and ensure Tor is running."
     fi
 
-    rm -f "$CONNECTED_FLAG" "$RECV_PIPE" "$SEND_PIPE"
+    # Full cleanup after call ends
+    cleanup_call
 }
 
 #=============================================================================
 # IN-CALL SESSION — PTT VOICE LOOP
 #=============================================================================
+
+# Draw the call header (reusable for redraw after settings)
+draw_call_header() {
+    local _remote="${1:-}"
+    local _rcipher="${2:-}"
+    clear >&2
+    if [ -n "$_remote" ]; then
+        echo -e "\n${BOLD}${BG_GREEN}${WHITE} CALL CONNECTED ${NC} ${CYAN}${_remote}${NC}\n" >&2
+    else
+        echo -e "\n${BOLD}${BG_GREEN}${WHITE} CALL CONNECTED ${NC}\n" >&2
+    fi
+
+    # Show cipher info — always show both local and remote
+    local cipher_upper="${CIPHER^^}"
+    if [ -n "$_rcipher" ]; then
+        local rcipher_upper="${_rcipher^^}"
+        if [ "$_rcipher" = "$CIPHER" ]; then
+            echo -e "  ${GREEN}●${NC} Local cipher:  ${WHITE}${cipher_upper}${NC}" >&2
+            echo -e "  ${GREEN}●${NC} Remote cipher: ${WHITE}${rcipher_upper}${NC}" >&2
+        else
+            echo -e "  ${RED}●${NC} Local cipher:  ${WHITE}${cipher_upper}${NC}" >&2
+            echo -e "  ${RED}●${NC} Remote cipher: ${WHITE}${rcipher_upper}${NC}" >&2
+        fi
+    else
+        echo -e "  ${GREEN}●${NC} Local cipher:  ${WHITE}${cipher_upper}${NC}" >&2
+        echo -e "  ${DIM}●${NC} Remote cipher: ${DIM}waiting...${NC}" >&2
+    fi
+    echo "" >&2
+
+    echo -e "  ${BOLD}Controls:${NC}" >&2
+    echo -e "  ${GREEN}[SPACE]${NC} -- Push-to-Talk" >&2
+    echo -e "  ${CYAN}[T]${NC}     -- Send text message" >&2
+    echo -e "  ${YELLOW}[S]${NC}     -- Settings" >&2
+    echo -e "  ${RED}[Q]${NC}     -- Hang up" >&2
+    echo -e "" >&2
+}
 
 in_call_session() {
     local recv_pipe="$1"
@@ -841,45 +944,59 @@ in_call_session() {
     rm -f "$PTT_FLAG"
     mkdir -p "$AUDIO_DIR"
 
+    # Write cipher to runtime file so subshells can track changes
+    echo "$CIPHER" > "$CIPHER_RUNTIME_FILE"
+
     # Open persistent file descriptors for the pipes
     exec 3< "$recv_pipe"  # fd 3 = read from remote
     exec 4> "$send_pipe"  # fd 4 = write to remote
 
-    # Send our onion address for caller ID
+    # Send our onion address and cipher for handshake
     local my_onion
     my_onion=$(get_onion)
     if [ -n "$my_onion" ]; then
         echo "ID:${my_onion}" >&4 2>/dev/null || true
     fi
+    echo "CIPHER:${CIPHER}" >&4 2>/dev/null || true
 
-    # Remote address (populated by receive loop)
+    # Remote address and cipher (populated by handshake / receive loop)
     local remote_id_file="$DATA_DIR/run/remote_id_$$"
-    rm -f "$remote_id_file"
+    local remote_cipher_file="$DATA_DIR/run/remote_cipher_$$"
+    rm -f "$remote_id_file" "$remote_cipher_file"
 
     # If we don't know the remote address yet (listener), wait briefly for handshake
     local remote_display="$known_remote"
+    local remote_cipher=""
     if [ -z "$remote_display" ]; then
-        # Read the first line — should be the ID handshake
+        # Read first line — should be ID
         local first_line=""
         if read -r -t 3 first_line <&3 2>/dev/null; then
             if [[ "$first_line" == ID:* ]]; then
                 remote_display="${first_line#ID:}"
                 echo "$remote_display" > "$remote_id_file"
+            elif [[ "$first_line" == CIPHER:* ]]; then
+                remote_cipher="${first_line#CIPHER:}"
             fi
         fi
     fi
 
-    # Show header with remote address
-    if [ -n "$remote_display" ]; then
-        echo -e "\n${BOLD}${BG_GREEN}${WHITE} CALL CONNECTED ${NC} ${CYAN}${remote_display}${NC}\n"
-    else
-        echo -e "\n${BOLD}${BG_GREEN}${WHITE} CALL CONNECTED ${NC}\n"
+    # Try to read CIPHER: line (quick, non-blocking)
+    if [ -z "$remote_cipher" ]; then
+        local cline=""
+        if read -r -t 1 cline <&3 2>/dev/null; then
+            if [[ "$cline" == CIPHER:* ]]; then
+                remote_cipher="${cline#CIPHER:}"
+            fi
+        fi
     fi
-    echo -e "  ${BOLD}Controls:${NC}"
-    echo -e "  ${GREEN}[SPACE]${NC} -- Push-to-Talk"
-    echo -e "  ${CYAN}[T]${NC}     -- Send text message"
-    echo -e "  ${RED}[Q]${NC}     -- Hang up"
-    echo -e ""
+
+    # Save remote cipher for later redraws
+    if [ -n "$remote_cipher" ]; then
+        echo "$remote_cipher" > "$remote_cipher_file"
+    fi
+
+    # Draw call header
+    draw_call_header "$remote_display" "$remote_cipher"
 
     # Start receive handler in background
     # Protocol: ID:<onion>, PTT_START, PTT_STOP, PING,
@@ -902,6 +1019,29 @@ in_call_session() {
                         # Caller ID received (save but don't print — already in header)
                         local remote_addr="${line#ID:}"
                         echo "$remote_addr" > "$remote_id_file"
+                        ;;
+                    CIPHER:*)
+                        # Remote side sent/changed their cipher — save and update display
+                        local rc="${line#CIPHER:}"
+                        echo "$rc" > "$remote_cipher_file" 2>/dev/null || true
+                        # Read current local cipher from runtime file
+                        local _cur_cipher="$CIPHER"
+                        [ -f "$CIPHER_RUNTIME_FILE" ] && _cur_cipher=$(cat "$CIPHER_RUNTIME_FILE")
+                        local _cu="${_cur_cipher^^}"
+                        local _ru="${rc^^}"
+                        # Update cipher lines in-place using ANSI cursor positioning (rows 4-5)
+                        local _dot_color
+                        if [ "$rc" = "$_cur_cipher" ]; then
+                            _dot_color="$GREEN"
+                        else
+                            _dot_color="$RED"
+                        fi
+                        printf '\033[s' >&2
+                        printf '\033[4;1H\033[K' >&2
+                        printf '  %b●%b Local cipher:  %b%s%b\r\n' "$_dot_color" "$NC" "$WHITE" "$_cu" "$NC" >&2
+                        printf '\033[K' >&2
+                        printf '  %b●%b Remote cipher: %b%s%b' "$_dot_color" "$NC" "$WHITE" "$_ru" "$NC" >&2
+                        printf '\033[u' >&2
                         ;;
                     MSG:*)
                         # Encrypted text message received
@@ -961,9 +1101,9 @@ in_call_session() {
     local ptt_active=0
 
     if [ $IS_TERMUX -eq 1 ]; then
-        echo -ne "\r  ${GREEN}${BOLD} Ready ${NC} ${DIM}[SPACE]=Talk [T]=Chat [Q]=Hang up${NC}   " >&2
+        echo -ne "\r  ${GREEN}${BOLD} Ready ${NC} ${DIM}[SPACE]=Talk [T]=Chat [S]=Settings [Q]=Hang up${NC}   " >&2
     else
-        echo -ne "\r  ${GREEN}${BOLD} Ready ${NC} ${DIM}[SPACE]=Hold to Talk [T]=Chat [Q]=Hang up${NC}   " >&2
+        echo -ne "\r  ${GREEN}${BOLD} Ready ${NC} ${DIM}[SPACE]=Hold to Talk [T]=Chat [S]=Settings [Q]=Hang up${NC}   " >&2
     fi
 
     while [ -f "$CONNECTED_FLAG" ]; do
@@ -981,7 +1121,7 @@ in_call_session() {
                     ptt_active=0
                     stop_and_send
                     echo "PTT_STOP" >&4 2>/dev/null || true
-                    echo -ne "\r  ${GREEN}${BOLD} Sent! ${NC} ${DIM}[SPACE]=Talk [T]=Chat [Q]=Hang up${NC}   " >&2
+                    echo -ne "\r  ${GREEN}${BOLD} Sent! ${NC} ${DIM}[SPACE]=Talk [T]=Chat [S]=Settings [Q]=Hang up${NC}   " >&2
                 fi
             else
                 # LINUX: Hold-to-talk
@@ -1015,7 +1155,7 @@ in_call_session() {
                 ptt_active=0
                 stop_and_send
                 echo "PTT_STOP" >&4 2>/dev/null || true
-                echo -ne "\r  ${GREEN}${BOLD} Sent! ${NC} ${DIM}[SPACE]=Hold to Talk [T]=Chat [Q]=Hang up${NC}   " >&2
+                echo -ne "\r  ${GREEN}${BOLD} Sent! ${NC} ${DIM}[SPACE]=Hold to Talk [T]=Chat [S]=Settings [Q]=Hang up${NC}   " >&2
             fi
 
         elif [ "$key" = "t" ] || [ "$key" = "T" ]; then
@@ -1045,33 +1185,32 @@ in_call_session() {
             stty raw -echo -icanon min 0 time 1
             echo "" >&2
             if [ $IS_TERMUX -eq 1 ]; then
-                echo -ne "  ${GREEN}${BOLD} Ready ${NC} ${DIM}[SPACE]=Talk [T]=Chat [Q]=Hang up${NC}   " >&2
+                echo -ne "  ${GREEN}${BOLD} Ready ${NC} ${DIM}[SPACE]=Talk [T]=Chat [S]=Settings [Q]=Hang up${NC}   " >&2
             else
-                echo -ne "  ${GREEN}${BOLD} Ready ${NC} ${DIM}[SPACE]=Hold to Talk [T]=Chat [Q]=Hang up${NC}   " >&2
+                echo -ne "  ${GREEN}${BOLD} Ready ${NC} ${DIM}[SPACE]=Hold to Talk [T]=Chat [S]=Settings [Q]=Hang up${NC}   " >&2
+            fi
+
+        elif [ "$key" = "s" ] || [ "$key" = "S" ]; then
+            # Mid-call settings
+            stty "$ORIGINAL_STTY" 2>/dev/null || stty sane
+            # Flush any leftover raw mode input
+            read -r -t 0.1 -n 10000 2>/dev/null || true
+            settings_menu
+            # Redraw call header and switch back to raw mode
+            local _rd="" _rc=""
+            [ -f "$remote_id_file" ] && _rd=$(cat "$remote_id_file" 2>/dev/null)
+            [ -z "$_rd" ] && _rd="$known_remote"
+            [ -f "$remote_cipher_file" ] && _rc=$(cat "$remote_cipher_file" 2>/dev/null)
+            draw_call_header "$_rd" "$_rc"
+            stty raw -echo -icanon min 0 time 1
+            if [ $IS_TERMUX -eq 1 ]; then
+                echo -ne "  ${GREEN}${BOLD} Ready ${NC} ${DIM}[SPACE]=Talk [T]=Chat [S]=Settings [Q]=Hang up${NC}   " >&2
+            else
+                echo -ne "  ${GREEN}${BOLD} Ready ${NC} ${DIM}[SPACE]=Hold to Talk [T]=Chat [S]=Settings [Q]=Hang up${NC}   " >&2
             fi
         fi
     done
 
-    # Restore terminal
-    stty "$ORIGINAL_STTY" 2>/dev/null || stty sane
-    ORIGINAL_STTY=""
-
-    # Close pipe fds FIRST to unblock any blocking reads
-    rm -f "$PTT_FLAG" "$CONNECTED_FLAG"
-    exec 3<&- 2>/dev/null || true
-    exec 4>&- 2>/dev/null || true
-
-    # Now kill background processes (they'll exit since fds are closed)
-    kill "$recv_pid" 2>/dev/null || true
-    if [ -n "$REC_PID" ]; then
-        kill "$REC_PID" 2>/dev/null || true
-    fi
-    # Brief wait, don't hang forever
-    sleep 0.5
-    wait "$recv_pid" 2>/dev/null || true
-
-    CALL_ACTIVE=0
-    rm -f "$remote_id_file"
     echo -e "\n${BOLD}${RED} CALL ENDED ${NC}\n"
 }
 
@@ -1202,11 +1341,206 @@ show_status() {
     fi
 
     # Config
-    echo -e "\n  ${DIM}Listen port: $LISTEN_PORT${NC}"
-    echo -e "  ${DIM}SOCKS port:  $TOR_SOCKS_PORT${NC}"
+    echo -e "\n  ${DIM}Listen port:  $LISTEN_PORT${NC}"
+    echo -e "  ${DIM}SOCKS port:   $TOR_SOCKS_PORT${NC}"
+    echo -e "  ${DIM}Cipher:       $CIPHER${NC}"
     echo -e "  ${DIM}Opus bitrate: ${OPUS_BITRATE}kbps${NC}"
-    echo -e "  ${DIM}PTT key:     [SPACEBAR]${NC}"
+    echo -e "  ${DIM}Opus frame:   ${OPUS_FRAMESIZE}ms${NC}"
+    echo -e "  ${DIM}PTT key:      [SPACEBAR]${NC}"
     echo ""
+}
+
+#=============================================================================
+# SETTINGS MENU
+#=============================================================================
+
+settings_menu() {
+    while true; do
+        clear
+        echo -e "\n${BOLD}${CYAN}═══ Settings ═══${NC}\n"
+        echo -e "  ${DIM}Current cipher:       ${NC}${WHITE}${CIPHER}${NC}"
+        echo -e "  ${DIM}Current Opus bitrate: ${NC}${WHITE}${OPUS_BITRATE} kbps${NC}"
+        echo -e "  ${DIM}Current Opus frame:   ${NC}${WHITE}${OPUS_FRAMESIZE} ms${NC}\n"
+
+        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Change encryption cipher"
+        echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Change Opus encoding quality"
+        echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back to main menu${NC}"
+        echo ""
+        echo -ne "  ${BOLD}Select: ${NC}"
+        read -r schoice
+
+        case "$schoice" in
+            1) settings_cipher ;;
+            2) settings_opus ;;
+            0|q|Q) return ;;
+            *)
+                echo -e "\n  ${RED}Invalid choice${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+settings_cipher() {
+    echo -e "\n${BOLD}${CYAN}═══ Select Encryption Cipher ═══${NC}\n"
+    echo -e "  ${DIM}Current: ${NC}${GREEN}${CIPHER}${NC}\n"
+
+    # Curated cipher list ranked from strongest to adequate
+    # Only includes ciphers verified to work with openssl enc -pbkdf2
+    # Excludes: ECB modes (pattern leakage), DES/RC2/RC4/Blowfish (weak), aliases
+    local ciphers=(
+        # ── 256-bit (Strongest) ──
+        "aes-256-ctr"
+        "aes-256-cbc"
+        "aes-256-cfb"
+        "aes-256-ofb"
+        "chacha20"
+        "camellia-256-ctr"
+        "camellia-256-cbc"
+        "aria-256-ctr"
+        "aria-256-cbc"
+        # ── 192-bit (Strong) ──
+        "aes-192-ctr"
+        "aes-192-cbc"
+        "camellia-192-ctr"
+        "camellia-192-cbc"
+        "aria-192-ctr"
+        "aria-192-cbc"
+        # ── 128-bit (Adequate) ──
+        "aes-128-ctr"
+        "aes-128-cbc"
+        "camellia-128-ctr"
+        "camellia-128-cbc"
+        "aria-128-ctr"
+        "aria-128-cbc"
+    )
+
+    local total=${#ciphers[@]}
+
+    while true; do
+        clear
+        echo -e "\n${BOLD}${CYAN}═══ Available Ciphers ═══${NC}"
+        echo -e "  ${DIM}Current: ${NC}${GREEN}${CIPHER}${NC}"
+        echo -e "  ${DIM}${total} ciphers, ranked strongest → adequate${NC}\n"
+
+        local tier=""
+        for ((i = 0; i < total; i++)); do
+            local num=$((i + 1))
+            local c="${ciphers[$i]}"
+
+            # Print tier headers
+            if [ $i -eq 0 ]; then
+                echo -e "  ${GREEN}${BOLD}── 256-bit (Strongest) ──${NC}"
+            elif [ $i -eq 9 ]; then
+                echo -e "  ${YELLOW}${BOLD}── 192-bit (Strong) ──${NC}"
+            elif [ $i -eq 15 ]; then
+                echo -e "  ${WHITE}${BOLD}── 128-bit (Adequate) ──${NC}"
+            fi
+
+            if [ "$c" = "$CIPHER" ]; then
+                printf "  ${GREEN}${BOLD}%4d${NC} ${CYAN}│${NC} ${GREEN}%-30s ◄ current${NC}\n" "$num" "$c"
+            else
+                printf "  ${WHITE}${BOLD}%4d${NC} ${CYAN}│${NC} %-30s\n" "$num" "$c"
+            fi
+        done
+
+        echo ""
+        echo -e "  ${DIM}[0] cancel${NC}"
+        echo -ne "  ${BOLD}Enter cipher number: ${NC}"
+        read -r cinput
+
+        case "$cinput" in
+            0|q|Q)
+                return
+                ;;
+            '')
+                ;;
+            *)
+                if [[ "$cinput" =~ ^[0-9]+$ ]] && [ "$cinput" -ge 1 ] && [ "$cinput" -le "$total" ]; then
+                    local selected="${ciphers[$((cinput - 1))]}"
+                    # Validate that openssl can actually use this cipher
+                    if echo "test" | openssl enc -"${selected}" -pbkdf2 -pass pass:test -nosalt 2>/dev/null | openssl enc -d -"${selected}" -pbkdf2 -pass pass:test -nosalt &>/dev/null; then
+                        CIPHER="$selected"
+                        save_config
+                        # Update runtime file for live mid-call sync
+                        [ -f "$CIPHER_RUNTIME_FILE" ] && echo "$CIPHER" > "$CIPHER_RUNTIME_FILE"
+                        # Notify remote side if in a call
+                        if [ "$CALL_ACTIVE" -eq 1 ]; then
+                            echo "CIPHER:${CIPHER}" >&4 2>/dev/null || true
+                        fi
+                        echo -e "\n  ${GREEN}${BOLD}✓${NC} Cipher set to ${WHITE}${BOLD}${CIPHER}${NC}"
+                    else
+                        echo -e "\n  ${RED}${BOLD}✗${NC} Cipher '${selected}' failed validation — not compatible with stream encryption"
+                    fi
+                    echo -ne "  ${DIM}Press Enter to continue...${NC}"
+                    read -r
+                    return
+                else
+                    echo -e "\n  ${RED}Invalid number${NC}"
+                    sleep 1
+                fi
+                ;;
+        esac
+    done
+}
+
+settings_opus() {
+    echo -e "\n${BOLD}${CYAN}═══ Opus Encoding Quality ═══${NC}\n"
+    echo -e "  ${DIM}Current bitrate: ${NC}${GREEN}${OPUS_BITRATE} kbps${NC}\n"
+
+    local -a presets=(6 8 12 16 24 32 48 64)
+    local -a labels=(
+        "6 kbps  — Minimum (very low bandwidth)"
+        "8 kbps  — Low (narrowband voice)"
+        "12 kbps — Medium-Low (clear voice)"
+        "16 kbps — Medium (recommended for Tor)"
+        "24 kbps — Medium-High (good quality)"
+        "32 kbps — High (wideband voice)"
+        "48 kbps — Very High (near-studio)"
+        "64 kbps — Maximum (best quality)"
+    )
+
+    for ((i = 0; i < ${#presets[@]}; i++)); do
+        local num=$((i + 1))
+        if [ "${presets[$i]}" = "$OPUS_BITRATE" ]; then
+            echo -e "  ${GREEN}${BOLD}${num}${NC} ${CYAN}│${NC} ${GREEN}${labels[$i]} ◄ current${NC}"
+        else
+            echo -e "  ${BOLD}${WHITE}${num}${NC} ${CYAN}│${NC} ${labels[$i]}"
+        fi
+    done
+
+    echo -e "  ${BOLD}${WHITE}9${NC} ${CYAN}│${NC} Custom bitrate"
+    echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Cancel${NC}"
+    echo ""
+    echo -ne "  ${BOLD}Select: ${NC}"
+    read -r oinput
+
+    case "$oinput" in
+        [1-8])
+            OPUS_BITRATE=${presets[$((oinput - 1))]}
+            save_config
+            echo -e "\n  ${GREEN}${BOLD}✓${NC} Opus bitrate set to ${WHITE}${BOLD}${OPUS_BITRATE} kbps${NC}"
+            ;;
+        9)
+            echo -ne "\n  ${BOLD}Enter bitrate (6-510 kbps): ${NC}"
+            read -r custom_br
+            if [[ "$custom_br" =~ ^[0-9]+$ ]] && [ "$custom_br" -ge 6 ] && [ "$custom_br" -le 510 ]; then
+                OPUS_BITRATE=$custom_br
+                save_config
+                echo -e "\n  ${GREEN}${BOLD}✓${NC} Opus bitrate set to ${WHITE}${BOLD}${OPUS_BITRATE} kbps${NC}"
+            else
+                echo -e "\n  ${RED}Invalid bitrate. Must be 6–510.${NC}"
+            fi
+            ;;
+        0|q|Q)
+            return
+            ;;
+        *)
+            echo -e "\n  ${RED}Invalid choice${NC}"
+            ;;
+    esac
+    echo -ne "  ${DIM}Press Enter to continue...${NC}"
+    read -r
 }
 
 #=============================================================================
@@ -1223,7 +1557,8 @@ show_banner() {
     echo -e "  ${TOR_PURPLE}───────────────────────────────────────${NC}"
     echo -e "  ${TOR_PURPLE}${BOLD}Encrypted Voice & Chat${NC} ${DIM}over${NC} ${TOR_PURPLE}${BOLD}Tor${NC} ${DIM}Hidden Services${NC}"
     echo -e "  ${TOR_PURPLE}───────────────────────────────────────${NC}"
-    echo -e "  ${DIM}v${VERSION} | Push-to-Talk | End-to-End AES-256${NC}\n"
+    local cipher_display="${CIPHER^^}"
+    echo -e "  ${DIM}v${VERSION} | Push-to-Talk | End-to-End ${cipher_display}${NC}\n"
 }
 
 main_menu() {
@@ -1253,6 +1588,7 @@ main_menu() {
         echo -e "  ${BOLD}${WHITE}9${NC} ${CYAN}│${NC} Stop Tor"
         echo -e "  ${BOLD}${WHITE}10${NC}${CYAN}│${NC} Restart Tor"
         echo -e "  ${BOLD}${WHITE}11${NC}${CYAN}│${NC} Rotate onion address"
+        echo -e "  ${BOLD}${WHITE}12${NC}${CYAN}│${NC} Settings"
         echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${RED}Quit${NC}"
         echo ""
         echo -ne "  ${BOLD}Select: ${NC}"
@@ -1306,6 +1642,9 @@ main_menu() {
                 rotate_onion
                 echo -ne "\n  ${DIM}Press Enter to continue...${NC}"
                 read -r
+                ;;
+            12)
+                settings_menu
                 ;;
             0|q|Q)
                 echo -e "\n${GREEN}Goodbye!${NC}"
