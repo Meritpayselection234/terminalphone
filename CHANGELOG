@@ -1,0 +1,17 @@
+Version 1.0.1 2-18-2026
+
+Version 1.01 is backwards compatible with version 1.0.0, but the cipher remote cipher will dispay as "unknown".
+
+New features:
+
+Option 12 added to the main menu. Sub menu for configuring opus encodeing quality and encryption cipher. 
+I have included an additional 21 ciphers that are already available in the openssl dependency. 
+Ciphers are listed in order of class/strength.
+
+While in a call, the program now displays remote and local cipher configurations. 
+These are exhanged on the initial handshake and update realtime if a user changes cipher mid call. 
+Green indicator dot shows if ciphers are matched. 
+Red indicator dot if ciphers are mismathed. 
+
+Included the abilty to change opus encoding and cipher configuration with a [S] hotkey while in a call.
+
