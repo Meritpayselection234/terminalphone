@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIGURATION
 #=============================================================================
 APP_NAME="TerminalPhone"
-VERSION="1.0.2"
+VERSION="1.0.3"
 BASE_DIR="$(dirname "$(readlink -f "$0")")"
 DATA_DIR="$BASE_DIR/.terminalphone"
 TOR_DIR="$DATA_DIR/tor_data"
@@ -422,19 +422,6 @@ set_shared_secret() {
     log_ok "Shared secret saved"
 }
 
-# Encrypt stdin to stdout
-encrypt_stream() {
-    local c="$CIPHER"
-    [ -f "$CIPHER_RUNTIME_FILE" ] && c=$(cat "$CIPHER_RUNTIME_FILE")
-    openssl enc -"${c}" -pbkdf2 -iter 10000 -pass "pass:${SHARED_SECRET}" -nosalt 2>/dev/null
-}
-
-# Decrypt stdin to stdout
-decrypt_stream() {
-    local c="$CIPHER"
-    [ -f "$CIPHER_RUNTIME_FILE" ] && c=$(cat "$CIPHER_RUNTIME_FILE")
-    openssl enc -d -"${c}" -pbkdf2 -iter 10000 -pass "pass:${SHARED_SECRET}" -nosalt 2>/dev/null
-}
 
 # Encrypt a file
 encrypt_file() {
@@ -1313,7 +1300,7 @@ settings_cipher() {
                 if [[ "$cinput" =~ ^[0-9]+$ ]] && [ "$cinput" -ge 1 ] && [ "$cinput" -le "$total" ]; then
                     local selected="${ciphers[$((cinput - 1))]}"
                     # Validate that openssl can actually use this cipher
-                    if echo "test" | openssl enc -"${selected}" -pbkdf2 -pass pass:test -nosalt 2>/dev/null | openssl enc -d -"${selected}" -pbkdf2 -pass pass:test -nosalt &>/dev/null; then
+                    if echo "test" | openssl enc -"${selected}" -pbkdf2 -pass pass:test 2>/dev/null | openssl enc -d -"${selected}" -pbkdf2 -pass pass:test &>/dev/null; then
                         CIPHER="$selected"
                         save_config
                         # Update runtime file for live mid-call sync
