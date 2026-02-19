@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIGURATION
 #=============================================================================
 APP_NAME="TerminalPhone"
-VERSION="1.0.6"
+VERSION="1.0.7"
 BASE_DIR="$(dirname "$(readlink -f "$0")")"
 DATA_DIR="$BASE_DIR/.terminalphone"
 TOR_DIR="$DATA_DIR/tor_data"
@@ -39,6 +39,16 @@ CHUNK_DURATION=1      # seconds per audio chunk
 CIPHER="aes-256-cbc"  # OpenSSL cipher for encryption
 SNOWFLAKE_ENABLED=0   # Snowflake bridge (off by default)
 AUTO_LISTEN=0         # Auto-listen after Tor starts (off by default)
+VOICE_EFFECT="none"   # Voice effect (none, deep, high, robot, echo, whisper, custom)
+
+# Custom voice effect parameters (used when VOICE_EFFECT=custom)
+VOICE_PITCH=0         # Pitch shift in cents (-600 to +600, 0=off)
+VOICE_OVERDRIVE=0     # Overdrive gain (0=off, 5-20)
+VOICE_FLANGER=0       # Flanger (0=off, 1=on)
+VOICE_ECHO_DELAY=0    # Echo delay in ms (0=off, 20-200)
+VOICE_ECHO_DECAY=5    # Echo decay (1-9 → 0.1-0.9)
+VOICE_HIGHPASS=0      # Highpass filter freq in Hz (0=off, 300-2000)
+VOICE_TREMOLO=0       # Tremolo speed in Hz (0=off, 5-40)
 
 # ANSI Colors
 RED='\033[0;31m'
@@ -164,6 +174,14 @@ PTT_KEY="$PTT_KEY"
 CIPHER="$CIPHER"
 SNOWFLAKE_ENABLED=$SNOWFLAKE_ENABLED
 AUTO_LISTEN=$AUTO_LISTEN
+VOICE_EFFECT="$VOICE_EFFECT"
+VOICE_PITCH=$VOICE_PITCH
+VOICE_OVERDRIVE=$VOICE_OVERDRIVE
+VOICE_FLANGER=$VOICE_FLANGER
+VOICE_ECHO_DELAY=$VOICE_ECHO_DELAY
+VOICE_ECHO_DECAY=$VOICE_ECHO_DECAY
+VOICE_HIGHPASS=$VOICE_HIGHPASS
+VOICE_TREMOLO=$VOICE_TREMOLO
 EOF
 }
 
@@ -556,6 +574,48 @@ start_recording() {
     fi
 }
 
+# Apply voice effect to raw PCM using sox
+apply_voice_effect() {
+    local infile="$1"
+    local outfile="$2"
+    local fmt="-t raw -r $SAMPLE_RATE -e signed -b 16 -c 1"
+    case "$VOICE_EFFECT" in
+        deep)
+            sox $fmt "$infile" $fmt "$outfile" pitch -400 2>/dev/null
+            ;;
+        high)
+            sox $fmt "$infile" $fmt "$outfile" pitch 500 2>/dev/null
+            ;;
+        robot)
+            sox $fmt "$infile" $fmt "$outfile" overdrive 10 flanger 2>/dev/null
+            ;;
+        echo)
+            sox $fmt "$infile" $fmt "$outfile" echo 0.8 0.88 60 0.4 2>/dev/null
+            ;;
+        whisper)
+            sox $fmt "$infile" $fmt "$outfile" highpass 1000 tremolo 20 2>/dev/null
+            ;;
+        custom)
+            # Build sox effects chain from individual parameters
+            local effects=""
+            [ "$VOICE_PITCH" -ne 0 ] 2>/dev/null && effects="$effects pitch $VOICE_PITCH"
+            [ "$VOICE_OVERDRIVE" -gt 0 ] 2>/dev/null && effects="$effects overdrive $VOICE_OVERDRIVE"
+            [ "$VOICE_FLANGER" -eq 1 ] 2>/dev/null && effects="$effects flanger"
+            [ "$VOICE_ECHO_DELAY" -gt 0 ] 2>/dev/null && effects="$effects echo 0.8 0.88 $VOICE_ECHO_DELAY 0.${VOICE_ECHO_DECAY}"
+            [ "$VOICE_HIGHPASS" -gt 0 ] 2>/dev/null && effects="$effects highpass $VOICE_HIGHPASS"
+            [ "$VOICE_TREMOLO" -gt 0 ] 2>/dev/null && effects="$effects tremolo $VOICE_TREMOLO"
+            if [ -n "$effects" ]; then
+                sox $fmt "$infile" $fmt "$outfile" $effects 2>/dev/null
+            else
+                return 1  # no effects configured
+            fi
+            ;;
+        *)
+            return 1  # no effect
+            ;;
+    esac
+}
+
 # Stop recording and send the message
 # Encodes, encrypts, base64-encodes, and writes to fd 4
 stop_and_send() {
@@ -584,6 +644,16 @@ stop_and_send() {
 
     REC_PID=""
     REC_FILE=""
+
+    # Apply voice effect if set
+    if [ -s "$raw_file" ] && [ "$VOICE_EFFECT" != "none" ]; then
+        local fx_file="$AUDIO_DIR/tx_fx_${_id}.raw"
+        if apply_voice_effect "$raw_file" "$fx_file"; then
+            mv "$fx_file" "$raw_file"
+        else
+            rm -f "$fx_file" 2>/dev/null
+        fi
+    fi
 
     # Encode → encrypt → send
     if [ -s "$raw_file" ]; then
@@ -1468,13 +1538,18 @@ settings_menu() {
 
         local ptt_display="SPACE"
         [ "$PTT_KEY" != " " ] && ptt_display="$PTT_KEY"
-        echo -e "  ${DIM}PTT key:              ${NC}${WHITE}${ptt_display}${NC}\n"
+        echo -e "  ${DIM}PTT key:              ${NC}${WHITE}${ptt_display}${NC}"
+
+        local vfx_display="${VOICE_EFFECT}"
+        [ "$vfx_display" = "none" ] && vfx_display="off"
+        echo -e "  ${DIM}Voice effect:          ${NC}${WHITE}${vfx_display}${NC}\n"
 
         echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Change encryption cipher"
         echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Change Opus encoding quality"
         echo -e "  ${BOLD}${WHITE}3${NC} ${CYAN}│${NC} Snowflake bridge (censorship circumvention)"
         echo -e "  ${BOLD}${WHITE}4${NC} ${CYAN}│${NC} Auto-listen (listen for calls automatically once Tor starts)"
         echo -e "  ${BOLD}${WHITE}5${NC} ${CYAN}│${NC} Change PTT (push-to-talk) key"
+        echo -e "  ${BOLD}${WHITE}6${NC} ${CYAN}│${NC} Voice changer"
         echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back to main menu${NC}"
         echo ""
         echo -ne "  ${BOLD}Select: ${NC}"
@@ -1518,6 +1593,7 @@ settings_menu() {
                 fi
                 sleep 1
                 ;;
+            6) settings_voice ;;
             0|q|Q) return ;;
             *)
                 echo -e "\n  ${RED}Invalid choice${NC}"
@@ -1760,6 +1836,137 @@ settings_snowflake() {
     esac
     echo -ne "  ${DIM}Press Enter to continue...${NC}"
     read -r
+}
+
+settings_voice() {
+    echo -e "\n${BOLD}${CYAN}═══ Voice Changer ═══${NC}\n"
+    echo -e "  ${DIM}Current effect: ${NC}${GREEN}${VOICE_EFFECT}${NC}\n"
+
+    local effects=("none" "deep" "high" "robot" "echo" "whisper" "custom")
+    local descs=(
+        "No effect (natural voice)"
+        "Deep voice (pitch shifted down)"
+        "High voice (pitch shifted up)"
+        "Robot (overdrive + flanger)"
+        "Echo (delayed reverb)"
+        "Whisper (highpass + tremolo)"
+        "Custom (configure all parameters)"
+    )
+
+    local i
+    for i in "${!effects[@]}"; do
+        local num=$(( i + 1 ))
+        local marker="  "
+        if [ "${effects[$i]}" = "$VOICE_EFFECT" ]; then
+            marker="${GREEN}> ${NC}"
+        fi
+        echo -e "  ${marker}${BOLD}${WHITE}${num}${NC} ${CYAN}│${NC} ${descs[$i]}"
+    done
+
+    echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back${NC}"
+    echo ""
+    echo -ne "  ${BOLD}Select: ${NC}"
+    read -r vchoice
+
+    case "$vchoice" in
+        1) VOICE_EFFECT="none" ;;
+        2) VOICE_EFFECT="deep" ;;
+        3) VOICE_EFFECT="high" ;;
+        4) VOICE_EFFECT="robot" ;;
+        5) VOICE_EFFECT="echo" ;;
+        6) VOICE_EFFECT="whisper" ;;
+        7) VOICE_EFFECT="custom"
+           settings_voice_custom
+           ;;
+        0|q|Q) return ;;
+        *)
+            echo -e "\n  ${RED}Invalid choice${NC}"
+            sleep 1
+            return
+            ;;
+    esac
+    save_config
+    log_ok "Voice effect set to: ${VOICE_EFFECT}"
+    sleep 1
+}
+
+settings_voice_custom() {
+    while true; do
+        clear
+        echo -e "\n${BOLD}${CYAN}═══ Custom Voice Effect ═══${NC}\n"
+        echo -e "  ${DIM}Configure each parameter. Effects are combined into one chain.${NC}"
+        echo -e "  ${DIM}Set a value to 0 to disable that effect.${NC}\n"
+
+        local _p_status="${RED}off${NC}"
+        [ "$VOICE_PITCH" -ne 0 ] 2>/dev/null && _p_status="${GREEN}${VOICE_PITCH} cents${NC}"
+        local _od_status="${RED}off${NC}"
+        [ "$VOICE_OVERDRIVE" -gt 0 ] 2>/dev/null && _od_status="${GREEN}${VOICE_OVERDRIVE}${NC}"
+        local _fl_status="${RED}off${NC}"
+        [ "$VOICE_FLANGER" -eq 1 ] 2>/dev/null && _fl_status="${GREEN}on${NC}"
+        local _ed_status="${RED}off${NC}"
+        [ "$VOICE_ECHO_DELAY" -gt 0 ] 2>/dev/null && _ed_status="${GREEN}${VOICE_ECHO_DELAY}ms  decay 0.${VOICE_ECHO_DECAY}${NC}"
+        local _hp_status="${RED}off${NC}"
+        [ "$VOICE_HIGHPASS" -gt 0 ] 2>/dev/null && _hp_status="${GREEN}${VOICE_HIGHPASS} Hz${NC}"
+        local _tr_status="${RED}off${NC}"
+        [ "$VOICE_TREMOLO" -gt 0 ] 2>/dev/null && _tr_status="${GREEN}${VOICE_TREMOLO} Hz${NC}"
+
+        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Pitch shift     ${_p_status}  ${DIM}(-600 to +600 cents)${NC}"
+        echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Overdrive       ${_od_status}  ${DIM}(0=off, 5-20)${NC}"
+        echo -e "  ${BOLD}${WHITE}3${NC} ${CYAN}│${NC} Flanger         ${_fl_status}  ${DIM}(0=off, 1=on)${NC}"
+        echo -e "  ${BOLD}${WHITE}4${NC} ${CYAN}│${NC} Echo            ${_ed_status}  ${DIM}(delay 0-200ms, decay 1-9)${NC}"
+        echo -e "  ${BOLD}${WHITE}5${NC} ${CYAN}│${NC} Highpass filter  ${_hp_status}  ${DIM}(0=off, 300-2000 Hz)${NC}"
+        echo -e "  ${BOLD}${WHITE}6${NC} ${CYAN}│${NC} Tremolo         ${_tr_status}  ${DIM}(0=off, 5-40 Hz)${NC}"
+        echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Done${NC}"
+        echo ""
+        echo -ne "  ${BOLD}Select parameter: ${NC}"
+        read -r pchoice
+
+        case "$pchoice" in
+            1)
+                echo -ne "  ${BOLD}Pitch shift (cents, -600 to +600, 0=off): ${NC}"
+                read -r val
+                [[ "$val" =~ ^-?[0-9]+$ ]] && VOICE_PITCH=$val
+                ;;
+            2)
+                echo -ne "  ${BOLD}Overdrive gain (0=off, 5-20): ${NC}"
+                read -r val
+                [[ "$val" =~ ^[0-9]+$ ]] && VOICE_OVERDRIVE=$val
+                ;;
+            3)
+                echo -ne "  ${BOLD}Flanger (0=off, 1=on): ${NC}"
+                read -r val
+                [[ "$val" =~ ^[01]$ ]] && VOICE_FLANGER=$val
+                ;;
+            4)
+                echo -ne "  ${BOLD}Echo delay (ms, 0=off, 20-200): ${NC}"
+                read -r val
+                [[ "$val" =~ ^[0-9]+$ ]] && VOICE_ECHO_DELAY=$val
+                if [ "$VOICE_ECHO_DELAY" -gt 0 ] 2>/dev/null; then
+                    echo -ne "  ${BOLD}Echo decay (1-9, maps to 0.1-0.9): ${NC}"
+                    read -r val
+                    [[ "$val" =~ ^[1-9]$ ]] && VOICE_ECHO_DECAY=$val
+                fi
+                ;;
+            5)
+                echo -ne "  ${BOLD}Highpass frequency (Hz, 0=off, 300-2000): ${NC}"
+                read -r val
+                [[ "$val" =~ ^[0-9]+$ ]] && VOICE_HIGHPASS=$val
+                ;;
+            6)
+                echo -ne "  ${BOLD}Tremolo speed (Hz, 0=off, 5-40): ${NC}"
+                read -r val
+                [[ "$val" =~ ^[0-9]+$ ]] && VOICE_TREMOLO=$val
+                ;;
+            0|q|Q)
+                save_config
+                return
+                ;;
+            *)
+                echo -e "\n  ${RED}Invalid choice${NC}"
+                sleep 1
+                ;;
+        esac
+    done
 }
 
 #=============================================================================
