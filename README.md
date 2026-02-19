@@ -35,6 +35,10 @@ TerminalPhone is a single, self-contained Bash script that provides anonymous, e
 - **Live Cipher Negotiation** -- Both parties exchange cipher information on connect. The call header shows both local and remote ciphers with green (match) or red (mismatch) indicators, updated in real time.
 - **Mid-Call Settings** -- Press `S` during a call to access settings. Change your cipher on the fly; the remote party's display updates automatically.
 - **Snowflake Bridge Info** -- When using Snowflake for censorship circumvention, the call page displays the bridge descriptor name, fingerprint, and transport connection status parsed from Tor's logs.
+- **Auto-Listen** -- When enabled, a background listener starts automatically when Tor boots. Incoming calls are detected and accepted from the main menu without needing to manually select "Listen for calls". After a call ends, the listener restarts.
+- **Configurable PTT Key** -- Change the push-to-talk key from the default spacebar to any key via the Settings menu.
+- **Message Stats** -- The call screen displays the encrypted payload size for sent and received messages, updated in-place.
+- **Connecting Animation** -- When calling a remote address, a cycling animation plays until the call interface loads.
 - **Tor Hidden Service** -- Each instance runs its own Tor hidden service. Your `.onion` address serves as a permanent, routable endpoint. No port forwarding or public IP required.
 - **End-to-End Encryption** -- All audio and text is encrypted using a configurable cipher (default: AES-256-CBC) with PBKDF2 key derivation from a pre-shared secret before entering the Tor network.
 - **Low Bandwidth** -- Opus codec at 16kbps, 8kHz mono. A typical 10-second voice message is under 20KB, well within Tor's capacity.
@@ -145,7 +149,7 @@ Both parties must have Tor running and the same shared secret configured before 
  9  Stop Tor                  Stop the Tor process
 10  Restart Tor               Stop and restart Tor
 11  Rotate onion address      Generate a new .onion address (destroys the old one)
-12  Settings                  Configure cipher and Opus quality
+12  Settings                  Configure cipher, Opus quality, Snowflake, auto-listen, PTT key
  0  Quit                      Stop Tor and exit
 ```
 
@@ -263,6 +267,9 @@ Default audio parameters (defined at the top of the script):
 | `TOR_SOCKS_PORT` | 9050 | Tor SOCKS proxy port |
 | `OPUS_BITRATE` | 16 | Opus encoding bitrate in kbps |
 | `CIPHER` | aes-256-cbc | Encryption cipher (configurable via Settings) |
+| `SNOWFLAKE_ENABLED` | 0 | Snowflake bridge for censorship circumvention |
+| `AUTO_LISTEN` | 0 | Auto-listen for calls when Tor starts |
+| `PTT_KEY` | SPACE | Push-to-talk key (configurable via Settings) |
 | `SAMPLE_RATE` | 8000 | Audio sample rate in Hz |
 | `CHUNK_DURATION` | 1 | Duration for audio test chunks in seconds |
 
@@ -301,6 +308,8 @@ If the script hangs after pressing Q, press Ctrl+C to force cleanup and return t
 [MIRROR V1.0.4](https://bin.disroot.org/?1831f6b78e349142#7zaAMVPNJL3MfbGJzjtm6cCPcvQftf4ULXupdne5dRKw)
 
 [MIRROR V1.0.5](https://bin.disroot.org/?edfcfc844987ed03#56LuBbqbkfNDXfHpydyaB3VcWYhYenX18dtSvNumERY9)
+
+[MIRROR V1.0.6](https://bin.disroot.org/?6c7b4774108b0c1c#GQPst46zjAYidndmNvytforX7MK2LyHanL4d829vVcv4)
 
 ---
 
