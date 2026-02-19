@@ -35,4 +35,4 @@ Added a patience notice during Tor bootstrap when Snowflake is enabled, as it ta
 
 Version 1.0.5 2-19-26
 
-Fix bug where the interface would not draw on any call after the first. 
+Fix bug where the interface would not draw on any call after the first without restarting the program.
