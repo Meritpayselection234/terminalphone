@@ -58,4 +58,16 @@ Configurable PTT key. New setting to change the push-to-talk key from the defaul
 
 Version 1.0.7 2-19-26
 
-Voice changer. New setting in the settings menu with 6 presets (deep, high, robot, echo, whisper) and a fully configurable custom mode. Custom mode lets you independently configure pitch shift, overdrive, flanger, echo delay/decay, highpass filter, and tremolo. Effects are applied using sox on the raw PCM audio before opus encoding. All parameters are chained together and persist to config.
+Voice changer. New setting in the settings menu with 6 presets (deep, high, robot, echo, whisper) and a fully configurable custom mode. 
+Custom mode lets you independently configure pitch shift, overdrive, flanger, echo delay/decay, highpass filter, and tremolo.
+Effects are applied using sox on the raw PCM audio before opus encoding. All parameters are chained together and persist to config.
+
+Version 1.0.8 2-19-26
+
+Termux security improvement. Replaced termux-media-player with sox play for audio playback on Termux. 
+
+The old approach handed decrypted audio files to Android's MediaPlayer system service, which could index them in the MediaStore database and expose file paths to other apps with media permissions. 
+
+The new approach plays audio entirely within Termux's process using sox. On the receive path, decrypted audio is piped directly from opusdec to sox play without ever touching disk. 
+
+No Android system service is involved and no IPC occurs. This change is fully backwards compatible.
