@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIGURATION
 #=============================================================================
 APP_NAME="TerminalPhone"
-VERSION="1.0.3"
+VERSION="1.0.4"
 BASE_DIR="$(dirname "$(readlink -f "$0")")"
 DATA_DIR="$BASE_DIR/.terminalphone"
 TOR_DIR="$DATA_DIR/tor_data"
@@ -25,6 +25,7 @@ RECV_PIPE="$DATA_DIR/run/recv_$$"
 SEND_PIPE="$DATA_DIR/run/send_$$"
 CIPHER_RUNTIME_FILE="$DATA_DIR/run/cipher_$$"
 
+
 # Defaults
 LISTEN_PORT=7777
 TOR_SOCKS_PORT=9050
@@ -34,6 +35,7 @@ SAMPLE_RATE=8000      # Hz
 PTT_KEY=" "           # spacebar
 CHUNK_DURATION=1      # seconds per audio chunk
 CIPHER="aes-256-cbc"  # OpenSSL cipher for encryption
+SNOWFLAKE_ENABLED=0   # Snowflake bridge (off by default)
 
 # ANSI Colors
 RED='\033[0;31m'
@@ -59,6 +61,7 @@ fi
 
 # State
 TOR_PID=""
+
 CALL_ACTIVE=0
 ORIGINAL_STTY=""
 
@@ -107,6 +110,7 @@ kill_bg_processes() {
     if [ -n "$TOR_PID" ] && kill -0 "$TOR_PID" 2>/dev/null; then
         kill "$TOR_PID" 2>/dev/null || true
     fi
+
 }
 
 save_pid() {
@@ -155,6 +159,7 @@ OPUS_BITRATE=$OPUS_BITRATE
 OPUS_FRAMESIZE=$OPUS_FRAMESIZE
 PTT_KEY="$PTT_KEY"
 CIPHER="$CIPHER"
+SNOWFLAKE_ENABLED=$SNOWFLAKE_ENABLED
 EOF
 }
 
@@ -269,14 +274,70 @@ HiddenServiceDir $TOR_DIR/hidden_service
 HiddenServicePort $LISTEN_PORT 127.0.0.1:$LISTEN_PORT
 Log notice file $TOR_DIR/tor.log
 EOF
+
+    # Append snowflake bridge config if enabled
+    if [ "$SNOWFLAKE_ENABLED" -eq 1 ] && check_dep snowflake-client; then
+        local sf_bin
+        sf_bin=$(command -v snowflake-client)
+        cat >> "$TOR_CONF" << EOF
+
+UseBridges 1
+ClientTransportPlugin snowflake exec $sf_bin
+Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://snowflake-broker.torproject.net/ ice=stun:stun.l.google.com:19302,stun:stun.voip.blackberry.com:3478
+EOF
+        log_info "Snowflake bridge enabled in torrc"
+    elif [ "$SNOWFLAKE_ENABLED" -eq 1 ]; then
+        log_warn "Snowflake enabled but snowflake-client not found — skipping bridge"
+    fi
+
     chmod 600 "$TOR_CONF"
 }
+
+install_snowflake() {
+    if check_dep snowflake-client; then
+        log_ok "snowflake-client already installed"
+        return 0
+    fi
+
+    log_info "Installing snowflake-client..."
+
+    local SUDO="sudo"
+    if [ $IS_TERMUX -eq 1 ]; then
+        SUDO=""
+    elif ! check_dep sudo; then
+        SUDO=""
+    fi
+
+    if [ $IS_TERMUX -eq 1 ]; then
+        pkg install -y snowflake-client
+    elif check_dep apt-get; then
+        $SUDO apt-get update -qq
+        $SUDO apt-get install -y snowflake-client
+    elif check_dep dnf; then
+        $SUDO dnf install -y snowflake-client
+    elif check_dep pacman; then
+        $SUDO pacman -S --noconfirm snowflake-pt-client
+    else
+        log_err "No supported package manager found. Install snowflake-client manually."
+        return 1
+    fi
+
+    if check_dep snowflake-client; then
+        log_ok "snowflake-client installed successfully"
+    else
+        log_err "snowflake-client installation failed"
+        return 1
+    fi
+}
+
+
 
 start_tor() {
     if [ -n "$TOR_PID" ] && kill -0 "$TOR_PID" 2>/dev/null; then
         log_info "Tor is already running (PID $TOR_PID)"
         return 0
     fi
+
 
     setup_tor
 
@@ -285,6 +346,9 @@ start_tor() {
     > "$tor_log"
 
     log_info "Starting Tor..."
+    if [ "$SNOWFLAKE_ENABLED" -eq 1 ]; then
+        echo -e "  ${DIM}Snowflake bridge enabled — this may take longer than usual, please be patient.${NC}"
+    fi
     tor -f "$TOR_CONF" &>/dev/null &
     TOR_PID=$!
     save_pid "tor" "$TOR_PID"
@@ -361,6 +425,7 @@ stop_tor() {
         TOR_PID=""
         log_ok "Tor stopped"
     fi
+
 }
 
 get_onion() {
@@ -765,6 +830,42 @@ draw_call_header() {
     else
         echo -e "  ${GREEN}●${NC} Local cipher:  ${WHITE}${cipher_upper}${NC}" >&2
         echo -e "  ${DIM}●${NC} Remote cipher: ${DIM}waiting...${NC}" >&2
+    fi
+
+    # Show Snowflake bridge info if enabled
+    if [ "$SNOWFLAKE_ENABLED" -eq 1 ]; then
+        local tor_log="$TOR_DIR/tor.log"
+        echo "" >&2
+        echo -e "  ${TOR_PURPLE}●${NC} ${BOLD}Snowflake bridge${NC}" >&2
+        if [ -f "$tor_log" ]; then
+            # Parse bridge descriptor: "new bridge descriptor 'NAME' (fresh): $FINGERPRINT"
+            local bridge_line=""
+            bridge_line=$(grep "new bridge descriptor" "$tor_log" 2>/dev/null | tail -1 || true)
+            if [ -n "$bridge_line" ]; then
+                local bridge_name=""
+                bridge_name=$(echo "$bridge_line" | sed -n "s/.*new bridge descriptor '\([^']*\)'.*/\1/p" || true)
+                local bridge_fp=""
+                bridge_fp=$(echo "$bridge_line" | sed -n 's/.*(\(fresh\|stale\)): \(.*\)/\2/p' || true)
+                if [ -n "$bridge_name" ]; then
+                    # Truncate fingerprint to fit terminal
+                    local fp_display="$bridge_fp"
+                    if [ ${#fp_display} -gt 40 ]; then
+                        fp_display="${fp_display:0:40}..."
+                    fi
+                    echo -e "    ${DIM}descriptor:${NC} ${WHITE}${bridge_name}${NC} ${DIM}— ${fp_display}${NC}" >&2
+                fi
+            fi
+            # Show managed proxy status
+            local proxy_line=""
+            proxy_line=$(grep 'Managed proxy.*snowflake' "$tor_log" 2>/dev/null | tail -1 || true)
+            if [ -n "$proxy_line" ]; then
+                if echo "$proxy_line" | grep -q "connected"; then
+                    echo -e "    ${DIM}transport:${NC}  ${GREEN}connected${NC}" >&2
+                else
+                    echo -e "    ${DIM}transport:${NC}  ${YELLOW}connecting...${NC}" >&2
+                fi
+            fi
+        fi
     fi
     echo "" >&2
 
@@ -1181,6 +1282,17 @@ show_status() {
         echo -e "  ${RED}●${NC} Audio dependencies missing"
     fi
 
+    # Snowflake
+    if [ "$SNOWFLAKE_ENABLED" -eq 1 ]; then
+        if check_dep snowflake-client; then
+            echo -e "  ${GREEN}●${NC} Snowflake bridge enabled"
+        else
+            echo -e "  ${YELLOW}●${NC} Snowflake enabled (client not installed)"
+        fi
+    else
+        echo -e "  ${DIM}●${NC} Snowflake bridge disabled"
+    fi
+
     # Config
     echo -e "\n  ${DIM}Listen port:  $LISTEN_PORT${NC}"
     echo -e "  ${DIM}SOCKS port:   $TOR_SOCKS_PORT${NC}"
@@ -1201,10 +1313,17 @@ settings_menu() {
         echo -e "\n${BOLD}${CYAN}═══ Settings ═══${NC}\n"
         echo -e "  ${DIM}Current cipher:       ${NC}${WHITE}${CIPHER}${NC}"
         echo -e "  ${DIM}Current Opus bitrate: ${NC}${WHITE}${OPUS_BITRATE} kbps${NC}"
-        echo -e "  ${DIM}Current Opus frame:   ${NC}${WHITE}${OPUS_FRAMESIZE} ms${NC}\n"
+        echo -e "  ${DIM}Current Opus frame:   ${NC}${WHITE}${OPUS_FRAMESIZE} ms${NC}"
+
+        local sf_label="${RED}disabled${NC}"
+        if [ "$SNOWFLAKE_ENABLED" -eq 1 ]; then
+            sf_label="${GREEN}enabled${NC}"
+        fi
+        echo -e "  ${DIM}Snowflake bridge:     ${NC}${sf_label}\n"
 
         echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Change encryption cipher"
         echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Change Opus encoding quality"
+        echo -e "  ${BOLD}${WHITE}3${NC} ${CYAN}│${NC} Snowflake bridge (censorship circumvention)"
         echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back to main menu${NC}"
         echo ""
         echo -ne "  ${BOLD}Select: ${NC}"
@@ -1213,6 +1332,7 @@ settings_menu() {
         case "$schoice" in
             1) settings_cipher ;;
             2) settings_opus ;;
+            3) settings_snowflake ;;
             0|q|Q) return ;;
             *)
                 echo -e "\n  ${RED}Invalid choice${NC}"
@@ -1384,6 +1504,79 @@ settings_opus() {
     read -r
 }
 
+settings_snowflake() {
+    clear
+    echo -e "\n${BOLD}${CYAN}═══ Snowflake Bridge ═══${NC}\n"
+    echo -e "  ${DIM}Snowflake uses WebRTC proxies to help bypass Tor censorship.${NC}"
+    echo -e "  ${DIM}Enable this if Tor is blocked in your region.${NC}\n"
+
+    if [ "$SNOWFLAKE_ENABLED" -eq 1 ]; then
+        echo -e "  Status: ${GREEN}${BOLD}ENABLED${NC}"
+    else
+        echo -e "  Status: ${RED}${BOLD}DISABLED${NC}"
+    fi
+
+    if check_dep snowflake-client; then
+        echo -e "  Binary: ${GREEN}●${NC} snowflake-client installed"
+    else
+        echo -e "  Binary: ${RED}●${NC} snowflake-client not installed"
+    fi
+
+    echo -e "  ${DIM}Tor manages snowflake-client as a pluggable transport.${NC}"
+
+    echo ""
+    if [ "$SNOWFLAKE_ENABLED" -eq 1 ]; then
+        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Disable Snowflake"
+    else
+        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Enable Snowflake"
+    fi
+    echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back${NC}"
+    echo ""
+    echo -ne "  ${BOLD}Select: ${NC}"
+    read -r sf_choice
+
+    case "$sf_choice" in
+        1)
+            if [ "$SNOWFLAKE_ENABLED" -eq 1 ]; then
+                SNOWFLAKE_ENABLED=0
+                save_config
+
+                echo -e "\n  ${YELLOW}${BOLD}✓${NC} Snowflake disabled"
+                echo -e "  ${DIM}Restart Tor for changes to take effect.${NC}"
+            else
+                # Install if not present
+                if ! check_dep snowflake-client; then
+                    echo ""
+                    echo -ne "  ${BOLD}snowflake-client not installed. Install now? [Y/n]: ${NC}"
+                    read -r install_confirm
+                    if [ "$install_confirm" != "n" ] && [ "$install_confirm" != "N" ]; then
+                        install_snowflake || {
+                            echo -ne "  ${DIM}Press Enter to continue...${NC}"
+                            read -r
+                            return
+                        }
+                    else
+                        echo -e "\n  ${YELLOW}Snowflake not enabled (client not installed)${NC}"
+                        echo -ne "  ${DIM}Press Enter to continue...${NC}"
+                        read -r
+                        return
+                    fi
+                fi
+                SNOWFLAKE_ENABLED=1
+                save_config
+                echo -e "\n  ${GREEN}${BOLD}✓${NC} Snowflake enabled"
+                echo -e "  ${DIM}Restart Tor for changes to take effect.${NC}"
+            fi
+            ;;
+        0|q|Q) return ;;
+        *)
+            echo -e "\n  ${RED}Invalid choice${NC}"
+            ;;
+    esac
+    echo -ne "  ${DIM}Press Enter to continue...${NC}"
+    read -r
+}
+
 #=============================================================================
 # MAIN MENU
 #=============================================================================
@@ -1415,8 +1608,12 @@ main_menu() {
         if [ -n "$SHARED_SECRET" ]; then
             secret_status="${GREEN}●${NC}"
         fi
+        local sf_status="${RED}●${NC}"
+        if [ "$SNOWFLAKE_ENABLED" -eq 1 ]; then
+            sf_status="${GREEN}●${NC}"
+        fi
 
-        echo -e "  ${DIM}Tor:${NC} $tor_status  ${DIM}Secret:${NC} $secret_status  ${DIM}PTT:${NC} ${GREEN}[SPACE]${NC}\n"
+        echo -e "  ${DIM}Tor:${NC} $tor_status  ${DIM}Secret:${NC} $secret_status  ${DIM}SF:${NC} $sf_status  ${DIM}PTT:${NC} ${GREEN}[SPACE]${NC}\n"
 
         echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Listen for calls"
         echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Call an onion address"
