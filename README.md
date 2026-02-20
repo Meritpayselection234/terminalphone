@@ -43,6 +43,7 @@ TerminalPhone is a single, self-contained Bash script that provides anonymous, e
 - **Volume PTT (Termux)** -- Experimental mode that lets you double-tap the Volume Down button to toggle recording, even when Termux is in the background. Requires `jq` (installed on demand). Volume is automatically restored after each trigger.
 - **Tor Hidden Service** -- Each instance runs its own Tor hidden service. Your `.onion` address serves as a permanent, routable endpoint. No port forwarding or public IP required.
 - **End-to-End Encryption** -- All audio and text is encrypted using a configurable cipher (default: AES-256-CBC) with PBKDF2 key derivation from a pre-shared secret before entering the Tor network.
+- **Passphrase-Protected Secret** -- The shared secret can be encrypted at rest using a user-chosen passphrase (AES-256-CBC, 100,000 PBKDF2 iterations). Existing plaintext secrets are automatically detected with an offer to migrate.
 - **Low Bandwidth** -- Opus codec at 16kbps, 8kHz mono. A typical 10-second voice message is under 20KB, well within Tor's capacity.
 - **Cross-Platform** -- Runs on standard Linux distributions and Android via Termux. Platform-specific audio backends are handled transparently.
 - **No Root Required** -- PTT input uses terminal raw mode. No special permissions or kernel modules needed.
@@ -231,7 +232,7 @@ On Termux, an additional conversion step handles Android's native M4A recording 
 
 ## Security Model
 
-**Encryption:** All audio is encrypted with a user-configurable cipher (default: AES-256-CBC) before transmission. 21 curated ciphers are available, ranked from strongest (256-bit) to adequate (128-bit). The key is derived from a pre-shared secret using PBKDF2 with 10,000 iterations. The encryption is applied at the application layer, independent of Tor's transport encryption.
+**Encryption:** All audio is encrypted with a user-configurable cipher (default: AES-256-CBC) before transmission. 21 curated ciphers are available, ranked from strongest (256-bit) to adequate (128-bit). The key is derived from a pre-shared secret using PBKDF2 with 10,000 iterations. The encryption is applied at the application layer, independent of Tor's transport encryption. Secrets are passed to OpenSSL via file descriptors (`-pass fd:3`), not command-line arguments, so they are never exposed in the process table.
 
 **Cipher negotiation:** Both parties exchange cipher names on connect and whenever a cipher is changed mid-call. Cipher names are not secret (Kerckhoffs's principle). If the local and remote ciphers do not match, both parties see red indicators in the call header.
 
@@ -239,7 +240,7 @@ On Termux, an additional conversion step handles Android's native M4A recording 
 
 **Traffic analysis resistance:** The record-then-send model produces irregular transmission patterns (variable-length messages at irregular intervals), which are harder to fingerprint than continuous streaming.
 
-**Authentication:** The shared secret serves as implicit authentication. If both parties do not have the same secret, decryption fails and no audio is played. On connect, both parties exchange `.onion` addresses for caller identification.
+**Authentication:** The shared secret serves as implicit authentication. If both parties do not have the same secret, decryption fails and no audio is played. On connect, both parties exchange `.onion` addresses for caller identification. The secret can optionally be encrypted at rest with a passphrase; on launch, the script prompts for the passphrase to unlock it.
 
 **Limitations:**
 
@@ -320,6 +321,8 @@ If the script hangs after pressing Q, press Ctrl+C to force cleanup and return t
 [MIRROR V1.0.8](https://bin.disroot.org/?06e38bd64e6fbdad#88MYs3dmq9rSMkmocpW3NYaaG4YfSdRCc9LJnEEzqGYp)
 
 [MIRROR V1.0.9](https://bin.disroot.org/?950218a9a7c71c66#E7Z94VCGBZozrfXYhGwKyAdMeTxuavg92tA1pn2DbrrB)
+
+[MIRROR V1.1.0](https://bin.disroot.org/?0b0da14f31521b3a#B1c23J8xFoZZKErvGG28PgbtfgtMUcDABWmQEoSZfXgh)
 
 ---
 
