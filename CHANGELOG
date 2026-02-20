@@ -71,3 +71,11 @@ The old approach handed decrypted audio files to Android's MediaPlayer system se
 The new approach plays audio entirely within Termux's process using sox. On the receive path, decrypted audio is piped directly from opusdec to sox play without ever touching disk. 
 
 No Android system service is involved and no IPC occurs. This change is fully backwards compatible.
+
+Version 1.0.9 2-20-26
+
+Volume PTT (Termux only, experimental). New setting in the settings menu that enables double-tap Volume Down to toggle PTT recording during a call. A background monitor polls termux-volume and detects rapid volume decreases as a double-tap trigger. Volume is automatically restored to its original level after each detection so the button never bottoms out.
+
+The feature requires jq for parsing the termux-volume JSON output. jq is not installed by default — the user is prompted to install it when enabling the feature.
+
+Dependency installer now prompts before installing. The main menu option 7 (Install Dependencies) now shows missing packages and asks for confirmation before proceeding, instead of auto-installing.
