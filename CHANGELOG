@@ -85,3 +85,11 @@ Version 1.1.0 2-20-26
 Passphrase-protected shared secret. The shared secret is no longer stored as plaintext by default. When setting a new secret, the user is prompted to encrypt it with a passphrase. The secret is encrypted using AES-256-CBC with 100,000 PBKDF2 iterations. On subsequent launches, the user enters the passphrase to unlock the secret. If the passphrase is skipped, the secret falls back to plaintext storage. Existing plaintext secrets are automatically detected and the user is offered a one-time migration to encrypted storage.
 
 Process visibility fix. All openssl invocations now pass the shared secret via file descriptor (fd:3) instead of the command line (-pass pass:). Previously, the secret was visible to any local process via /proc/<pid>/cmdline while openssl was running. The secret is now passed through a kernel pipe buffer that is not exposed in the process table. This hardens against local privilege escalation and process snooping. Fully backwards compatible — the encrypted output is byte-identical.
+
+Version 1.1.1 2-23-26
+
+QR code for onion address. Option 3 (Show my onion address) now offers to display a scannable QR code of your .onion address directly in the terminal. If qrencode is not installed, the user is prompted to install it (libqrencode on Termux, qrencode on apt/dnf/pacman). The QR code renders on the terminal's alternate screen buffer and is destroyed when dismissed — it does not persist in scroll history.
+
+Opaque temporary filenames. All temporary audio, text, and encryption files now use a generic .tmp extension instead of revealing extensions (.opus, .m4a, .raw, .bin, .txt). A file left on disk no longer reveals what type of data it contains.
+
+Random file identifiers. The uid() function now generates random hex bytes from /dev/urandom instead of nanosecond timestamps. Temporary filenames no longer leak the exact time a message was sent or received. This eliminates timing metadata from the filesystem.
