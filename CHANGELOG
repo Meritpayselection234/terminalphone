@@ -93,3 +93,15 @@ QR code for onion address. Option 3 (Show my onion address) now offers to displa
 Opaque temporary filenames. All temporary audio, text, and encryption files now use a generic .tmp extension instead of revealing extensions (.opus, .m4a, .raw, .bin, .txt). A file left on disk no longer reveals what type of data it contains.
 
 Random file identifiers. The uid() function now generates random hex bytes from /dev/urandom instead of nanosecond timestamps. Temporary filenames no longer leak the exact time a message was sent or received. This eliminates timing metadata from the filesystem.
+
+Version 1.1.2 2-24-26
+
+Circuit hop display. During a call, the header now shows the Tor circuit path with relay names and full country names. The display lists each hop vertically — Guard, Relay, and Rendezvous — resolved via the Tor control port. Circuits auto-refresh every 60 seconds to stay accurate if Tor rotates the path mid-call.
+
+Tor Settings submenu. New option 8 in Settings opens a Tor Settings submenu. Currently contains the circuit display toggle (opt-in). Enabling circuit display adds ControlPort with cookie authentication to the torrc. Requires a Tor restart after toggling.
+
+GeoIP auto-detection. The torrc now includes explicit GeoIPFile and GeoIPv6File directives, resolved automatically from Termux ($PREFIX/share/tor), standard Linux (/usr/share/tor), or local builds (/usr/local/share/tor).
+
+I plan on expanding this submenu to take advantage and manage all the tor configurations available in the torrc. Will potentially migrage the snoflake menu to this submenu as well.
+
+Improved the listen for calls option. You can now stop listening and it will bring you back to the menu, or you can start the autolistener. Previously you could only stop with ctrl+c which would also kill tor and the application entirely.
