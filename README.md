@@ -48,6 +48,8 @@ TerminalPhone is a single, self-contained Bash script that provides anonymous, e
 - **QR Code Sharing** -- Option 3 can display your `.onion` address as a scannable QR code in the terminal. If `qrencode` is not installed, you are prompted to install it. The QR code renders on the alternate screen buffer and is destroyed when dismissed.
 - **Opaque Temporary Files** -- All temp files use generic `.tmp` extensions and random hex identifiers. No file type or timing metadata is leaked to the filesystem.
 - **Circuit Hop Display** -- Opt-in display of your Tor circuit path during calls, showing relay names and full country names. Auto-refreshes every 60 seconds. Configurable via Settings → Tor Settings.
+- **Exclude Countries** -- Exclude specific countries from your Tor circuits. Presets for Five Eyes, Nine Eyes, and Fourteen Eyes alliances, or enter custom country codes. Uses `ExcludeNodes` with `StrictNodes` in the torrc.
+- **HMAC Protocol Authentication** -- Optional HMAC-SHA256 signing of all protocol messages (voice, text, control signals) using the shared secret. A random nonce is included per message, and seen nonces are tracked to reject replays. Unsigned, forged, or replayed messages are silently dropped. HMAC state is frozen at call start to prevent mid-call desync. Configurable via Settings → Security.
 - **Cross-Platform** -- Runs on standard Linux distributions and Android via Termux. Platform-specific audio backends are handled transparently.
 - **No Root Required** -- PTT input uses terminal raw mode. No special permissions or kernel modules needed.
 - **Single Script** -- One Bash file. No build system, no runtime, no framework.
@@ -155,7 +157,7 @@ Both parties must have Tor running and the same shared secret configured before 
  9  Stop Tor                  Stop the Tor process
 10  Restart Tor               Stop and restart Tor
 11  Rotate onion address      Generate a new .onion address (destroys the old one)
-12  Settings                  Configure cipher, Opus quality, Snowflake, auto-listen, PTT key, voice changer, volume PTT
+12  Settings                  Configure Opus quality, Snowflake, auto-listen, PTT key, voice changer, security, Tor settings
  0  Quit                      Stop Tor and exit
 ```
 
@@ -245,6 +247,8 @@ On Termux, an additional conversion step handles Android's native M4A recording 
 
 **Authentication:** The shared secret serves as implicit authentication. If both parties do not have the same secret, decryption fails and no audio is played. On connect, both parties exchange `.onion` addresses for caller identification. The secret can optionally be encrypted at rest with a passphrase; on launch, the script prompts for the passphrase to unlock it.
 
+**HMAC protocol signing (optional):** When enabled, every wire protocol message -- including control signals like HANGUP, PTT_START, and PING -- is signed with HMAC-SHA256 derived from the shared secret. A random nonce is included per message so that identical commands produce unique signatures. Seen nonces are tracked per call and duplicates are rejected, preventing replay attacks. The HMAC setting is frozen at call start via a runtime file so that both the send and receive paths always agree, even if the setting is toggled mid-call (changes take effect on the next call). On the receiving end, any message with an invalid, missing, or replayed signature is silently dropped. This prevents an attacker who compromises the Tor circuit (but does not have the shared secret) from injecting or replaying commands. Both parties must enable HMAC for calls to work. Not compatible with versions prior to 1.1.3.
+
 **Limitations:**
 
 - The shared secret must be exchanged out-of-band through a secure channel (in person, encrypted messaging, etc.).
@@ -278,6 +282,8 @@ Default audio parameters (defined at the top of the script):
 | `AUTO_LISTEN` | 0 | Auto-listen for calls when Tor starts |
 | `PTT_KEY` | SPACE | Push-to-talk key (configurable via Settings) |
 | `VOL_PTT` | 0 | Volume-down double-tap PTT, Termux only (experimental) |
+| `EXCLUDE_NODES` | (empty) | Tor ExcludeNodes country list (e.g. `{US},{GB}`) |
+| `HMAC_AUTH` | 0 | HMAC-sign all protocol messages (optional, both sides must match) |
 | `SAMPLE_RATE` | 8000 | Audio sample rate in Hz |
 | `CHUNK_DURATION` | 1 | Duration for audio test chunks in seconds |
 
@@ -330,6 +336,8 @@ If the script hangs after pressing Q, press Ctrl+C to force cleanup and return t
 [MIRROR V1.1.1](https://bin.disroot.org/?d8e2d4f0300eb5af#9Y1C8CkcH9jAmv1fh4GZs1yYpJmWCG5xG3SvDYdwnJam)
 
 [MIRROR V1.1.2](https://bin.disroot.org/?b1059616f880925f#8ef2oscZXUkPAsJZwGfWvLPQagVAk5GgW4DyssmLvQpG)
+
+[MIRROR V1.1.3](https://bin.disroot.org/?b02658801518aaa7#JE6CsBLWUwAnTdBqeHgeXL7QF5UExgi9rnygcfyMZjCJ)
 
 ---
 
