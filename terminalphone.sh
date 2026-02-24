@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIGURATION
 #=============================================================================
 APP_NAME="TerminalPhone"
-VERSION="1.1.1"
+VERSION="1.1.2"
 BASE_DIR="$(dirname "$(readlink -f "$0")")"
 DATA_DIR="$BASE_DIR/.terminalphone"
 TOR_DIR="$DATA_DIR/tor_data"
@@ -41,6 +41,8 @@ SNOWFLAKE_ENABLED=0   # Snowflake bridge (off by default)
 AUTO_LISTEN=0         # Auto-listen after Tor starts (off by default)
 VOICE_EFFECT="none"   # Voice effect (none, deep, high, robot, echo, whisper, custom)
 VOL_PTT=0             # Volume-down double-tap PTT (Termux only, experimental)
+SHOW_CIRCUIT=0        # Show Tor circuit hops in call header (off by default)
+TOR_CONTROL_PORT=9051 # Tor control port (used when SHOW_CIRCUIT=1)
 
 # Custom voice effect parameters (used when VOICE_EFFECT=custom)
 VOICE_PITCH=0         # Pitch shift in cents (-600 to +600, 0=off)
@@ -233,6 +235,7 @@ VOICE_ECHO_DECAY=$VOICE_ECHO_DECAY
 VOICE_HIGHPASS=$VOICE_HIGHPASS
 VOICE_TREMOLO=$VOICE_TREMOLO
 VOL_PTT=$VOL_PTT
+SHOW_CIRCUIT=$SHOW_CIRCUIT
 EOF
 }
 
@@ -353,6 +356,28 @@ HiddenServiceDir $TOR_DIR/hidden_service
 HiddenServicePort $LISTEN_PORT 127.0.0.1:$LISTEN_PORT
 Log notice file $TOR_DIR/tor.log
 EOF
+
+    # Locate and add GeoIP files (required for ip-to-country lookups)
+    local geoip="" geoip6=""
+    for dir in "${PREFIX:-}/share/tor" "/usr/share/tor" "/usr/local/share/tor"; do
+        [ -f "$dir/geoip" ] && geoip="$dir/geoip"
+        [ -f "$dir/geoip6" ] && geoip6="$dir/geoip6"
+        [ -n "$geoip" ] && break
+    done
+    if [ -n "$geoip" ]; then
+        echo "GeoIPFile $geoip" >> "$TOR_CONF"
+        [ -n "$geoip6" ] && echo "GeoIPv6File $geoip6" >> "$TOR_CONF"
+    fi
+
+    # Append ControlPort config if circuit display is enabled
+    if [ "$SHOW_CIRCUIT" -eq 1 ]; then
+        cat >> "$TOR_CONF" << EOF
+
+ControlPort $TOR_CONTROL_PORT
+CookieAuthentication 1
+EOF
+        log_info "ControlPort enabled for circuit display"
+    fi
 
     # Append snowflake bridge config if enabled
     if [ "$SNOWFLAKE_ENABLED" -eq 1 ] && check_dep snowflake-client; then
@@ -536,6 +561,144 @@ rotate_onion() {
     rm -rf "$TOR_DIR/hidden_service"
     log_info "Old hidden service keys deleted"
     start_tor
+}
+
+#=============================================================================
+# CIRCUIT HOP DISPLAY
+#=============================================================================
+
+# Map 2-letter country code to full name
+cc_to_country() {
+    case "${1,,}" in
+        ad) echo "Andorra";; ae) echo "UAE";; al) echo "Albania";; am) echo "Armenia";;
+        at) echo "Austria";; au) echo "Australia";; az) echo "Azerbaijan";;
+        ba) echo "Bosnia";; be) echo "Belgium";; bg) echo "Bulgaria";; br) echo "Brazil";;
+        by) echo "Belarus";; ca) echo "Canada";; ch) echo "Switzerland";; cl) echo "Chile";;
+        cn) echo "China";; co) echo "Colombia";; cr) echo "Costa Rica";;
+        cy) echo "Cyprus";; cz) echo "Czechia";; de) echo "Germany";; dk) echo "Denmark";;
+        dz) echo "Algeria";; ec) echo "Ecuador";; ee) echo "Estonia";; eg) echo "Egypt";;
+        es) echo "Spain";; fi) echo "Finland";; fr) echo "France";;
+        gb) echo "UK";; ge) echo "Georgia";; gr) echo "Greece";;
+        hk) echo "Hong Kong";; hr) echo "Croatia";; hu) echo "Hungary";;
+        id) echo "Indonesia";; ie) echo "Ireland";; il) echo "Israel";; in) echo "India";;
+        iq) echo "Iraq";; ir) echo "Iran";; is) echo "Iceland";; it) echo "Italy";;
+        jp) echo "Japan";; ke) echo "Kenya";; kg) echo "Kyrgyzstan";;
+        kr) echo "South Korea";; kz) echo "Kazakhstan";;
+        lb) echo "Lebanon";; li) echo "Liechtenstein";; lt) echo "Lithuania";;
+        lu) echo "Luxembourg";; lv) echo "Latvia";;
+        ma) echo "Morocco";; md) echo "Moldova";; me) echo "Montenegro";; mk) echo "N. Macedonia";;
+        mt) echo "Malta";; mx) echo "Mexico";; my) echo "Malaysia";;
+        ng) echo "Nigeria";; nl) echo "Netherlands";; no) echo "Norway";; nz) echo "New Zealand";;
+        pa) echo "Panama";; pe) echo "Peru";; ph) echo "Philippines";; pk) echo "Pakistan";;
+        pl) echo "Poland";; pt) echo "Portugal";;
+        ro) echo "Romania";; rs) echo "Serbia";; ru) echo "Russia";;
+        sa) echo "Saudi Arabia";; se) echo "Sweden";; sg) echo "Singapore";; si) echo "Slovenia";;
+        sk) echo "Slovakia";; th) echo "Thailand";; tn) echo "Tunisia";; tr) echo "Turkey";;
+        tw) echo "Taiwan";; ua) echo "Ukraine";; us) echo "USA";;
+        uy) echo "Uruguay";; uz) echo "Uzbekistan";; ve) echo "Venezuela";;
+        vn) echo "Vietnam";; za) echo "South Africa";;
+        *) echo "${1^^}";;
+    esac
+}
+
+# Query Tor control port for active circuit hops
+# Outputs one line per hop: "relay_name|country_name"
+# Returns 1 if circuit info is unavailable
+get_circuit_hops() {
+    [ "$SHOW_CIRCUIT" -eq 0 ] && return 1
+
+    local cookie_file="$TOR_DIR/data/control_auth_cookie"
+    [ ! -f "$cookie_file" ] && return 1
+
+    local cookie_hex
+    cookie_hex=$(od -An -tx1 "$cookie_file" | tr -d ' \n' 2>/dev/null) || return 1
+    [ -z "$cookie_hex" ] && return 1
+
+    # Step 1: Get circuit status
+    local circ_resp
+    circ_resp=$({
+        printf 'AUTHENTICATE %s\r\n' "$cookie_hex"
+        printf 'GETINFO circuit-status\r\n'
+        printf 'QUIT\r\n'
+    } | socat - TCP:127.0.0.1:$TOR_CONTROL_PORT 2>/dev/null | tr -d '\r') || return 1
+
+    echo "$circ_resp" | grep -q "^250 OK" || return 1
+
+    # Find best BUILT circuit — prefer HS circuits
+    local circuit_line
+    circuit_line=$(echo "$circ_resp" | grep " BUILT " \
+        | grep -E "PURPOSE=HS_SERVICE_INTRO|PURPOSE=HS_CLIENT_REND" | head -1) || true
+    [ -z "$circuit_line" ] && circuit_line=$(echo "$circ_resp" | grep " BUILT " | head -1)
+    [ -z "$circuit_line" ] && return 1
+
+    # Extract path (field 3: comma-separated $FP~Name entries)
+    local path
+    path=$(echo "$circuit_line" | awk '{print $3}')
+    [ -z "$path" ] && return 1
+
+    # Parse relay names and fingerprints
+    local names=() fps=()
+    IFS=',' read -ra relays <<< "$path"
+    for r in "${relays[@]}"; do
+        local name fp
+        if [[ "$r" == *"~"* ]]; then
+            name="${r#*~}"; fp="${r%%~*}"
+        else
+            name="${r:0:8}..."; fp="$r"
+        fi
+        names+=("$name")
+        fps+=("${fp#\$}")
+    done
+    [ ${#names[@]} -eq 0 ] && return 1
+
+    # Step 2: Get IPs for all relays via ns/id (single session)
+    local ns_resp
+    ns_resp=$({
+        printf 'AUTHENTICATE %s\r\n' "$cookie_hex"
+        for fp in "${fps[@]}"; do
+            printf 'GETINFO ns/id/%s\r\n' "$fp"
+        done
+        printf 'QUIT\r\n'
+    } | socat - TCP:127.0.0.1:$TOR_CONTROL_PORT 2>/dev/null | tr -d '\r') || true
+
+    local ips=()
+    if [ -n "$ns_resp" ]; then
+        while IFS= read -r rline; do
+            ips+=("$(echo "$rline" | awk '{print $7}')")
+        done <<< "$(echo "$ns_resp" | grep '^r ')"
+    fi
+
+    # Step 3: Resolve countries for all IPs (single session)
+    local countries=()
+    local has_ips=0
+    for ip in "${ips[@]}"; do [ -n "$ip" ] && has_ips=1 && break; done
+
+    if [ "$has_ips" -eq 1 ]; then
+        local cc_resp
+        cc_resp=$({
+            printf 'AUTHENTICATE %s\r\n' "$cookie_hex"
+            for ip in "${ips[@]}"; do
+                [ -n "$ip" ] && printf 'GETINFO ip-to-country/%s\r\n' "$ip"
+            done
+            printf 'QUIT\r\n'
+        } | socat - TCP:127.0.0.1:$TOR_CONTROL_PORT 2>/dev/null | tr -d '\r') || true
+
+        if [ -n "$cc_resp" ]; then
+            while IFS= read -r ccline; do
+                local cc
+                cc=$(echo "$ccline" | sed 's/.*=//')
+                countries+=("$(cc_to_country "$cc")")
+            done <<< "$(echo "$cc_resp" | grep 'ip-to-country')"
+        fi
+    fi
+
+    # Output one line per hop: "name|country"
+    local total=${#names[@]}
+    for ((i = 0; i < total; i++)); do
+        local country="${countries[$i]:-??}"
+        echo "${names[$i]}|${country}"
+    done
+    return 0
 }
 
 #=============================================================================
@@ -854,6 +1017,12 @@ cleanup_call() {
     rm -f "$DATA_DIR/run/incoming_$$"
     rm -f "$DATA_DIR/run/vol_ptt_trigger_$$"
 
+    # Kill circuit refresh if active
+    if [ -n "$CIRCUIT_REFRESH_PID" ]; then
+        kill "$CIRCUIT_REFRESH_PID" 2>/dev/null || true
+        CIRCUIT_REFRESH_PID=""
+    fi
+
     # Clean temp audio files
     rm -f "$AUDIO_DIR"/*.tmp 2>/dev/null || true
 
@@ -1011,7 +1180,7 @@ listen_for_call() {
     echo -e "  ${GREEN}Your address:${NC} ${BOLD}${WHITE}$onion${NC}"
     echo -e "  ${GREEN}Listening on:${NC} port $LISTEN_PORT"
     echo -e "\n  ${DIM}Share your .onion address with the caller.${NC}"
-    echo -e "  ${DIM}Press Ctrl+C to stop listening.${NC}\n"
+    echo -e "  ${DIM}[Q] Stop listening  [B] Listen in background${NC}\n"
 
     mkdir -p "$AUDIO_DIR"
     log_info "Waiting for incoming connection..."
@@ -1035,7 +1204,35 @@ listen_for_call() {
             start_auto_listener
             return 1
         fi
-        sleep 0.5
+        # Read user input with 1-second timeout
+        local user_input=""
+        if read -r -t 1 user_input 2>/dev/null; then
+            case "$user_input" in
+                q|Q)
+                    # Stop all listening (manual + auto), return to menu
+                    kill "$socat_pid" 2>/dev/null || true
+                    wait "$socat_pid" 2>/dev/null || true
+                    rm -f "$RECV_PIPE" "$SEND_PIPE" "$incoming_flag"
+                    stop_auto_listener
+                    AUTO_LISTEN=0
+                    save_config
+                    log_info "Stopped listening."
+                    return 0
+                    ;;
+                b|B)
+                    # Move to background: kill manual socat, enable auto-listen
+                    kill "$socat_pid" 2>/dev/null || true
+                    wait "$socat_pid" 2>/dev/null || true
+                    rm -f "$RECV_PIPE" "$SEND_PIPE" "$incoming_flag"
+                    AUTO_LISTEN=1
+                    save_config
+                    start_auto_listener
+                    log_ok "Listening in background. Returning to menu."
+                    sleep 1
+                    return 0
+                    ;;
+            esac
+        fi
     done
 
     touch "$CONNECTED_FLAG"
@@ -1186,6 +1383,31 @@ draw_call_header() {
             fi
         fi
     fi
+
+    # Circuit hop display (vertical)
+    CIRCUIT_START_ROW=0
+    CIRCUIT_HOP_COUNT=0
+    if [ "$SHOW_CIRCUIT" -eq 1 ]; then
+        local _hop_data
+        _hop_data=$(get_circuit_hops 2>/dev/null) || true
+        if [ -n "$_hop_data" ]; then
+            echo "" >&2; _r=$((_r + 1))
+            echo -e "  ${TOR_PURPLE}●${NC} ${BOLD}Circuit${NC}" >&2; _r=$((_r + 1))
+            CIRCUIT_START_ROW=$_r
+            local _hop_i=0 _hop_total
+            _hop_total=$(echo "$_hop_data" | wc -l)
+            while IFS='|' read -r _hname _hcountry; do
+                _hop_i=$((_hop_i + 1))
+                local _hlabel="Relay"
+                [ $_hop_i -eq 1 ] && _hlabel="Guard"
+                [ $_hop_i -eq $_hop_total ] && _hlabel="Rendezvous"
+                printf '    \033[2m%-13s\033[0m \033[1;37m%s\033[0m \033[2m(%s)\033[0m\n' "${_hlabel}:" "$_hname" "$_hcountry" >&2
+                _r=$((_r + 1))
+            done <<< "$_hop_data"
+            CIRCUIT_HOP_COUNT=$_hop_i
+        fi
+    fi
+
     echo "" >&2; _r=$((_r + 1))
 
     # Static placeholders — updated in-place via ANSI positioning
@@ -1209,6 +1431,47 @@ draw_call_header() {
 
     echo "" >&2
     echo "" >&2
+}
+
+# Refresh circuit hops in-place during a call (called from background loop)
+refresh_circuit_display() {
+    [ "$SHOW_CIRCUIT" -eq 0 ] && return
+    [ "$CIRCUIT_START_ROW" -eq 0 ] && return
+    [ "$CIRCUIT_HOP_COUNT" -eq 0 ] && return
+
+    local _hop_data
+    _hop_data=$(get_circuit_hops 2>/dev/null) || return
+    [ -z "$_hop_data" ] && return
+
+    local _hop_i=0 _hop_total
+    _hop_total=$(echo "$_hop_data" | wc -l)
+
+    printf '\033[s' >&2  # save cursor
+    while IFS='|' read -r _hname _hcountry; do
+        _hop_i=$((_hop_i + 1))
+        [ $_hop_i -gt $CIRCUIT_HOP_COUNT ] && break  # don't overflow allocated rows
+        local _hlabel="Relay"
+        [ $_hop_i -eq 1 ] && _hlabel="Guard"
+        [ $_hop_i -eq $_hop_total ] && _hlabel="Rendezvous"
+        local _row=$((CIRCUIT_START_ROW + _hop_i - 1))
+        printf '\033[%d;1H\033[K' "$_row" >&2
+        printf '    \033[2m%-13s\033[0m \033[1;37m%s\033[0m \033[2m(%s)\033[0m' "${_hlabel}:" "$_hname" "$_hcountry" >&2
+    done <<< "$_hop_data"
+    printf '\033[u' >&2  # restore cursor
+}
+
+# Background circuit refresh loop (60-second interval)
+start_circuit_refresh() {
+    [ "$SHOW_CIRCUIT" -eq 0 ] && return
+    [ "$CIRCUIT_START_ROW" -eq 0 ] && return
+    (
+        while [ -f "$CONNECTED_FLAG" ]; do
+            sleep 60
+            [ -f "$CONNECTED_FLAG" ] || break
+            refresh_circuit_display
+        done
+    ) &
+    CIRCUIT_REFRESH_PID=$!
 }
 
 in_call_session() {
@@ -1284,6 +1547,10 @@ in_call_session() {
         wait "$spinner_pid" 2>/dev/null || true
     fi
     draw_call_header "$remote_display" "$remote_cipher"
+
+    # Start periodic circuit refresh
+    CIRCUIT_REFRESH_PID=""
+    start_circuit_refresh
 
     # Start receive handler in background
     # Protocol: ID:<onion>, PTT_START, PTT_STOP, PING,
@@ -1731,6 +1998,12 @@ settings_menu() {
             fi
             echo -e "  ${DIM}Volume PTT:            ${NC}${vp_label}  ${DIM}(experimental)${NC}"
         fi
+
+        local circ_label="${RED}disabled${NC}"
+        if [ "$SHOW_CIRCUIT" -eq 1 ]; then
+            circ_label="${GREEN}enabled${NC}"
+        fi
+        echo -e "  ${DIM}Circuit display:      ${NC}${circ_label}"
         echo ""
 
         echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Change encryption cipher"
@@ -1742,6 +2015,7 @@ settings_menu() {
         if [ $IS_TERMUX -eq 1 ]; then
             echo -e "  ${BOLD}${WHITE}7${NC} ${CYAN}│${NC} Volume PTT ${DIM}(double-tap Vol Down to talk, experimental)${NC}"
         fi
+        echo -e "  ${BOLD}${WHITE}8${NC} ${CYAN}│${NC} Tor settings"
         echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back to main menu${NC}"
         echo ""
         echo -ne "  ${BOLD}Select: ${NC}"
@@ -1821,6 +2095,7 @@ settings_menu() {
                     sleep 1
                 fi
                 ;;
+            8) settings_tor ;;
             0|q|Q) return ;;
             *)
                 echo -e "\n  ${RED}Invalid choice${NC}"
@@ -2188,6 +2463,47 @@ settings_voice_custom() {
                 save_config
                 return
                 ;;
+            *)
+                echo -e "\n  ${RED}Invalid choice${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+settings_tor() {
+    while true; do
+        clear
+        echo -e "\n${BOLD}${CYAN}═══ Tor Settings ═══${NC}\n"
+
+        local circ_label="${RED}disabled${NC}"
+        if [ "$SHOW_CIRCUIT" -eq 1 ]; then
+            circ_label="${GREEN}enabled${NC}"
+        fi
+        echo -e "  ${DIM}Circuit display:  ${NC}${circ_label}"
+        echo ""
+
+        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Toggle circuit hop display in calls"
+        echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back${NC}"
+        echo ""
+        echo -ne "  ${BOLD}Select: ${NC}"
+        read -r _tor_choice
+
+        case "$_tor_choice" in
+            1)
+                if [ "$SHOW_CIRCUIT" -eq 1 ]; then
+                    SHOW_CIRCUIT=0
+                    save_config
+                    log_ok "Circuit display disabled"
+                else
+                    SHOW_CIRCUIT=1
+                    save_config
+                    log_ok "Circuit display enabled"
+                fi
+                echo -e "  ${DIM}Restart Tor for changes to take effect (Main menu → option 10).${NC}"
+                sleep 2
+                ;;
+            0|q|Q) return ;;
             *)
                 echo -e "\n  ${RED}Invalid choice${NC}"
                 sleep 1
