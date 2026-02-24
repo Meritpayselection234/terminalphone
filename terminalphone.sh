@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIGURATION
 #=============================================================================
 APP_NAME="TerminalPhone"
-VERSION="1.1.2"
+VERSION="1.1.3"
 BASE_DIR="$(dirname "$(readlink -f "$0")")"
 DATA_DIR="$BASE_DIR/.terminalphone"
 TOR_DIR="$DATA_DIR/tor_data"
@@ -24,6 +24,8 @@ CONNECTED_FLAG="$DATA_DIR/run/connected_$$"
 RECV_PIPE="$DATA_DIR/run/recv_$$"
 SEND_PIPE="$DATA_DIR/run/send_$$"
 CIPHER_RUNTIME_FILE="$DATA_DIR/run/cipher_$$"
+HMAC_RUNTIME_FILE="$DATA_DIR/run/hmac_$$"
+NONCE_LOG_FILE="$DATA_DIR/run/nonces_$$"
 AUTO_LISTEN_FLAG="$DATA_DIR/run/autolisten_$$"
 AUTO_LISTEN_PID=""
 
@@ -43,6 +45,8 @@ VOICE_EFFECT="none"   # Voice effect (none, deep, high, robot, echo, whisper, cu
 VOL_PTT=0             # Volume-down double-tap PTT (Termux only, experimental)
 SHOW_CIRCUIT=0        # Show Tor circuit hops in call header (off by default)
 TOR_CONTROL_PORT=9051 # Tor control port (used when SHOW_CIRCUIT=1)
+EXCLUDE_NODES=""      # Tor ExcludeNodes (comma-separated country codes, e.g. {US},{GB})
+HMAC_AUTH=0           # HMAC-sign all protocol messages (off by default)
 
 # Custom voice effect parameters (used when VOICE_EFFECT=custom)
 VOICE_PITCH=0         # Pitch shift in cents (-600 to +600, 0=off)
@@ -236,6 +240,8 @@ VOICE_HIGHPASS=$VOICE_HIGHPASS
 VOICE_TREMOLO=$VOICE_TREMOLO
 VOL_PTT=$VOL_PTT
 SHOW_CIRCUIT=$SHOW_CIRCUIT
+EXCLUDE_NODES="$EXCLUDE_NODES"
+HMAC_AUTH=$HMAC_AUTH
 EOF
 }
 
@@ -377,6 +383,16 @@ ControlPort $TOR_CONTROL_PORT
 CookieAuthentication 1
 EOF
         log_info "ControlPort enabled for circuit display"
+    fi
+
+    # Append ExcludeNodes if configured
+    if [ -n "$EXCLUDE_NODES" ]; then
+        cat >> "$TOR_CONF" << EOF
+
+ExcludeNodes $EXCLUDE_NODES
+StrictNodes 1
+EOF
+        log_info "ExcludeNodes: $EXCLUDE_NODES"
     fi
 
     # Append snowflake bridge config if enabled
@@ -778,6 +794,60 @@ decrypt_file() {
 }
 
 #=============================================================================
+# PROTOCOL SEND / VERIFY (HMAC)
+#=============================================================================
+
+# Send a protocol message, optionally HMAC-signed with random nonce
+proto_send() {
+    local msg="$1"
+    local _hmac=0
+    [ -f "$HMAC_RUNTIME_FILE" ] && _hmac=$(cat "$HMAC_RUNTIME_FILE" 2>/dev/null)
+    [ -z "$_hmac" ] && _hmac="$HMAC_AUTH"
+    if [ "$_hmac" -eq 1 ]; then
+        local nonce sig signed_msg
+        nonce=$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')
+        signed_msg="${nonce}:${msg}"
+        sig=$(printf '%s' "$signed_msg" | openssl dgst -sha256 -hmac "$SHARED_SECRET" -r 2>/dev/null | cut -d' ' -f1)
+        echo "${signed_msg}|${sig}" >&4 2>/dev/null || true
+    else
+        echo "$msg" >&4 2>/dev/null || true
+    fi
+}
+
+# Verify HMAC on a received message
+# Outputs the raw message (without nonce) on stdout; returns 1 on failure
+proto_verify() {
+    local line="$1"
+    local _hmac=0
+    [ -f "$HMAC_RUNTIME_FILE" ] && _hmac=$(cat "$HMAC_RUNTIME_FILE" 2>/dev/null)
+    [ -z "$_hmac" ] && _hmac="$HMAC_AUTH"
+    if [ "$_hmac" -ne 1 ]; then
+        echo "$line"
+        return 0
+    fi
+    # Must contain | separator for HMAC
+    if [[ "$line" != *"|"* ]]; then
+        return 1
+    fi
+    local signed_msg="${line%|*}"
+    local received_sig="${line##*|}"
+    local expected_sig
+    expected_sig=$(printf '%s' "$signed_msg" | openssl dgst -sha256 -hmac "$SHARED_SECRET" -r 2>/dev/null | cut -d' ' -f1)
+    if [ "$received_sig" = "$expected_sig" ]; then
+        # Reject replayed nonces
+        local nonce="${signed_msg%%:*}"
+        if grep -qF "$nonce" "$NONCE_LOG_FILE" 2>/dev/null; then
+            return 1
+        fi
+        echo "$nonce" >> "$NONCE_LOG_FILE" 2>/dev/null
+        # Strip nonce prefix (nonce:message → message)
+        echo "${signed_msg#*:}"
+        return 0
+    fi
+    return 1
+}
+
+#=============================================================================
 # AUDIO PIPELINE
 #=============================================================================
 
@@ -920,7 +990,7 @@ stop_and_send() {
 
                 local b64
                 b64=$(base64 -w 0 "$enc_file" 2>/dev/null)
-                echo "AUDIO:${b64}" >&4 2>/dev/null || true
+                proto_send "AUDIO:${b64}"
                 LAST_SENT_INFO="${size_whole}.${size_frac}KB"
             fi
         fi
@@ -1012,6 +1082,8 @@ cleanup_call() {
     rm -f "$PTT_FLAG" "$CONNECTED_FLAG"
     rm -f "$RECV_PIPE" "$SEND_PIPE"
     rm -f "$CIPHER_RUNTIME_FILE"
+    rm -f "$HMAC_RUNTIME_FILE"
+    rm -f "$NONCE_LOG_FILE"
     rm -f "$DATA_DIR/run/remote_id_$$"
     rm -f "$DATA_DIR/run/remote_cipher_$$"
     rm -f "$DATA_DIR/run/incoming_$$"
@@ -1492,6 +1564,8 @@ in_call_session() {
 
     # Write cipher to runtime file so subshells can track changes
     echo "$CIPHER" > "$CIPHER_RUNTIME_FILE"
+    echo "$HMAC_AUTH" > "$HMAC_RUNTIME_FILE"
+    : > "$NONCE_LOG_FILE"
 
     # Open persistent file descriptors for the pipes
     exec 3< "$recv_pipe"  # fd 3 = read from remote
@@ -1501,9 +1575,9 @@ in_call_session() {
     local my_onion
     my_onion=$(get_onion)
     if [ -n "$my_onion" ]; then
-        echo "ID:${my_onion}" >&4 2>/dev/null || true
+        proto_send "ID:${my_onion}"
     fi
-    echo "CIPHER:${CIPHER}" >&4 2>/dev/null || true
+    proto_send "CIPHER:${CIPHER}"
 
     # Remote address and cipher (populated by handshake / receive loop)
     local remote_id_file="$DATA_DIR/run/remote_id_$$"
@@ -1517,6 +1591,7 @@ in_call_session() {
         # Read first line — should be ID
         local first_line=""
         if read -r -t 3 first_line <&3 2>/dev/null; then
+            first_line=$(proto_verify "$first_line") || first_line=""
             if [[ "$first_line" == ID:* ]]; then
                 remote_display="${first_line#ID:}"
                 echo "$remote_display" > "$remote_id_file"
@@ -1530,6 +1605,7 @@ in_call_session() {
     if [ -z "$remote_cipher" ]; then
         local cline=""
         if read -r -t 1 cline <&3 2>/dev/null; then
+            cline=$(proto_verify "$cline") || cline=""
             if [[ "$cline" == CIPHER:* ]]; then
                 remote_cipher="${cline#CIPHER:}"
             fi
@@ -1559,6 +1635,7 @@ in_call_session() {
         while [ -f "$CONNECTED_FLAG" ]; do
             local line=""
             if read -r line <&3 2>/dev/null; then
+                line=$(proto_verify "$line") || continue
                 case "$line" in
                     PTT_START)
                         printf '\033[s' >&2
@@ -1695,7 +1772,7 @@ in_call_session() {
                 else
                     ptt_active=0
                     stop_and_send
-                    echo "PTT_STOP" >&4 2>/dev/null || true
+                    proto_send "PTT_STOP"
                     # Update Last sent + status bar
                     printf '\033[s' >&2
                     printf '\033[%d;1H\033[K' "$SENT_INFO_ROW" >&2
@@ -1729,7 +1806,7 @@ in_call_session() {
                 REC_FILE=""
             fi
             echo -e "\r\n${YELLOW}Hanging up...${NC}" >&2
-            echo "HANGUP" >&4 2>/dev/null || true
+            proto_send "HANGUP"
             rm -f "$PTT_FLAG" "$CONNECTED_FLAG"
             break
 
@@ -1739,7 +1816,7 @@ in_call_session() {
                 stty time 1  # restore fast timeout for key detection
                 ptt_active=0
                 stop_and_send
-                echo "PTT_STOP" >&4 2>/dev/null || true
+                proto_send "PTT_STOP"
                 # Update Last sent + status bar
                 printf '\033[s' >&2
                 printf '\033[%d;1H\033[K' "$SENT_INFO_ROW" >&2
@@ -1767,7 +1844,7 @@ in_call_session() {
                 if [ -s "$chat_enc" ]; then
                     local chat_b64
                     chat_b64=$(base64 -w 0 "$chat_enc" 2>/dev/null)
-                    echo "MSG:${chat_b64}" >&4 2>/dev/null || true
+                    proto_send "MSG:${chat_b64}"
                     echo -e "  ${DIM}[you] ${chat_msg}${NC}" >&2
                 fi
                 rm -f "$chat_plain" "$chat_enc" 2>/dev/null
@@ -1967,15 +2044,8 @@ settings_menu() {
     while true; do
         clear
         echo -e "\n${BOLD}${CYAN}═══ Settings ═══${NC}\n"
-        echo -e "  ${DIM}Current cipher:       ${NC}${WHITE}${CIPHER}${NC}"
         echo -e "  ${DIM}Current Opus bitrate: ${NC}${WHITE}${OPUS_BITRATE} kbps${NC}"
         echo -e "  ${DIM}Current Opus frame:   ${NC}${WHITE}${OPUS_FRAMESIZE} ms${NC}"
-
-        local sf_label="${RED}disabled${NC}"
-        if [ "$SNOWFLAKE_ENABLED" -eq 1 ]; then
-            sf_label="${GREEN}enabled${NC}"
-        fi
-        echo -e "  ${DIM}Snowflake bridge:     ${NC}${sf_label}"
 
         local al_label="${RED}disabled${NC}"
         if [ "$AUTO_LISTEN" -eq 1 ]; then
@@ -2004,28 +2074,31 @@ settings_menu() {
             circ_label="${GREEN}enabled${NC}"
         fi
         echo -e "  ${DIM}Circuit display:      ${NC}${circ_label}"
+
+        local hmac_label="${RED}disabled${NC}"
+        if [ "$HMAC_AUTH" -eq 1 ]; then
+            hmac_label="${GREEN}enabled${NC}"
+        fi
+        echo -e "  ${DIM}HMAC auth:            ${NC}${hmac_label}"
         echo ""
 
-        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Change encryption cipher"
-        echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Change Opus encoding quality"
-        echo -e "  ${BOLD}${WHITE}3${NC} ${CYAN}│${NC} Snowflake bridge (censorship circumvention)"
-        echo -e "  ${BOLD}${WHITE}4${NC} ${CYAN}│${NC} Auto-listen (listen for calls automatically once Tor starts)"
-        echo -e "  ${BOLD}${WHITE}5${NC} ${CYAN}│${NC} Change PTT (push-to-talk) key"
-        echo -e "  ${BOLD}${WHITE}6${NC} ${CYAN}│${NC} Voice changer"
+        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Change Opus encoding quality"
+        echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Auto-listen (listen for calls automatically once Tor starts)"
+        echo -e "  ${BOLD}${WHITE}3${NC} ${CYAN}│${NC} Change PTT (push-to-talk) key"
+        echo -e "  ${BOLD}${WHITE}4${NC} ${CYAN}│${NC} Voice changer"
         if [ $IS_TERMUX -eq 1 ]; then
-            echo -e "  ${BOLD}${WHITE}7${NC} ${CYAN}│${NC} Volume PTT ${DIM}(double-tap Vol Down to talk, experimental)${NC}"
+            echo -e "  ${BOLD}${WHITE}5${NC} ${CYAN}│${NC} Volume PTT ${DIM}(double-tap Vol Down to talk, experimental)${NC}"
         fi
-        echo -e "  ${BOLD}${WHITE}8${NC} ${CYAN}│${NC} Tor settings"
+        echo -e "  ${BOLD}${WHITE}6${NC} ${CYAN}│${NC} Tor settings"
+        echo -e "  ${BOLD}${WHITE}7${NC} ${CYAN}│${NC} Security"
         echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back to main menu${NC}"
         echo ""
         echo -ne "  ${BOLD}Select: ${NC}"
         read -r schoice
 
         case "$schoice" in
-            1) settings_cipher ;;
-            2) settings_opus ;;
-            3) settings_snowflake ;;
-            4)
+            1) settings_opus ;;
+            2)
                 if [ "$AUTO_LISTEN" -eq 1 ]; then
                     AUTO_LISTEN=0
                     stop_auto_listener
@@ -2038,7 +2111,7 @@ settings_menu() {
                 save_config
                 sleep 1
                 ;;
-            5)
+            3)
                 local _pd="SPACE"
                 [ "$PTT_KEY" != " " ] && _pd="$PTT_KEY"
                 echo -e "\n  ${DIM}Current PTT key: ${NC}${WHITE}${_pd}${NC}"
@@ -2059,8 +2132,8 @@ settings_menu() {
                 fi
                 sleep 1
                 ;;
-            6) settings_voice ;;
-            7)
+            4) settings_voice ;;
+            5)
                 if [ $IS_TERMUX -eq 1 ]; then
                     if [ "$VOL_PTT" -eq 1 ]; then
                         VOL_PTT=0
@@ -2095,7 +2168,8 @@ settings_menu() {
                     sleep 1
                 fi
                 ;;
-            8) settings_tor ;;
+            6) settings_tor ;;
+            7) settings_security ;;
             0|q|Q) return ;;
             *)
                 echo -e "\n  ${RED}Invalid choice${NC}"
@@ -2190,7 +2264,7 @@ settings_cipher() {
                         [ -f "$CIPHER_RUNTIME_FILE" ] && echo "$CIPHER" > "$CIPHER_RUNTIME_FILE"
                         # Notify remote side if in a call
                         if [ "$CALL_ACTIVE" -eq 1 ]; then
-                            echo "CIPHER:${CIPHER}" >&4 2>/dev/null || true
+                            proto_send "CIPHER:${CIPHER}"
                         fi
                         echo -e "\n  ${GREEN}${BOLD}✓${NC} Cipher set to ${WHITE}${BOLD}${CIPHER}${NC}"
                     else
@@ -2480,10 +2554,22 @@ settings_tor() {
         if [ "$SHOW_CIRCUIT" -eq 1 ]; then
             circ_label="${GREEN}enabled${NC}"
         fi
+        local excl_label="${DIM}none${NC}"
+        if [ -n "$EXCLUDE_NODES" ]; then
+            excl_label="${YELLOW}${EXCLUDE_NODES}${NC}"
+        fi
+        local sf_label="${RED}disabled${NC}"
+        if [ "$SNOWFLAKE_ENABLED" -eq 1 ]; then
+            sf_label="${GREEN}enabled${NC}"
+        fi
         echo -e "  ${DIM}Circuit display:  ${NC}${circ_label}"
+        echo -e "  ${DIM}Exclude nodes:    ${NC}${excl_label}"
+        echo -e "  ${DIM}Snowflake bridge: ${NC}${sf_label}"
         echo ""
 
         echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Toggle circuit hop display in calls"
+        echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Exclude countries from circuits"
+        echo -e "  ${BOLD}${WHITE}3${NC} ${CYAN}│${NC} Snowflake bridge (censorship circumvention)"
         echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back${NC}"
         echo ""
         echo -ne "  ${BOLD}Select: ${NC}"
@@ -2502,6 +2588,223 @@ settings_tor() {
                 fi
                 echo -e "  ${DIM}Restart Tor for changes to take effect (Main menu → option 10).${NC}"
                 sleep 2
+                ;;
+            2) settings_exclude_nodes ;;
+            3) settings_snowflake ;;
+            0|q|Q) return ;;
+            *)
+                echo -e "\n  ${RED}Invalid choice${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+settings_exclude_nodes() {
+    while true; do
+        clear
+        echo -e "\n${BOLD}${CYAN}═══ Exclude Countries ═══${NC}\n"
+
+        if [ -n "$EXCLUDE_NODES" ]; then
+            echo -e "  ${DIM}Current:${NC} ${YELLOW}${EXCLUDE_NODES}${NC}"
+        else
+            echo -e "  ${DIM}Current:${NC} ${DIM}none (all countries allowed)${NC}"
+        fi
+        echo -e "  ${DIM}Tor will avoid building circuits through excluded countries.${NC}"
+        echo ""
+
+        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Five Eyes       ${DIM}(US, GB, CA, AU, NZ)${NC}"
+        echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Nine Eyes       ${DIM}(+ DK, FR, NL, NO)${NC}"
+        echo -e "  ${BOLD}${WHITE}3${NC} ${CYAN}│${NC} Fourteen Eyes   ${DIM}(+ DE, BE, IT, SE, ES)${NC}"
+        echo -e "  ${BOLD}${WHITE}4${NC} ${CYAN}│${NC} Custom countries"
+        echo -e "  ${BOLD}${WHITE}5${NC} ${CYAN}│${NC} ${RED}Clear (allow all)${NC}"
+        echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back${NC}"
+        echo ""
+        echo -ne "  ${BOLD}Select: ${NC}"
+        read -r _excl_choice
+
+        case "$_excl_choice" in
+            1)
+                EXCLUDE_NODES="{US},{GB},{CA},{AU},{NZ}"
+                save_config
+                log_ok "Excluding Five Eyes countries"
+                echo -e "  ${DIM}Restart Tor for changes to take effect.${NC}"
+                sleep 2
+                ;;
+            2)
+                EXCLUDE_NODES="{US},{GB},{CA},{AU},{NZ},{DK},{FR},{NL},{NO}"
+                save_config
+                log_ok "Excluding Nine Eyes countries"
+                echo -e "  ${DIM}Restart Tor for changes to take effect.${NC}"
+                sleep 2
+                ;;
+            3)
+                EXCLUDE_NODES="{US},{GB},{CA},{AU},{NZ},{DK},{FR},{NL},{NO},{DE},{BE},{IT},{SE},{ES}"
+                save_config
+                log_ok "Excluding Fourteen Eyes countries"
+                echo -e "  ${DIM}Restart Tor for changes to take effect.${NC}"
+                sleep 2
+                ;;
+            4)
+                clear
+                echo -e "\n${BOLD}${CYAN}═══ Custom Country Exclusion ═══${NC}\n"
+                echo -e "  ${DIM}Country code reference:${NC}\n"
+                echo -e "  ${WHITE}AF${NC} Afghanistan      ${WHITE}AL${NC} Albania          ${WHITE}DZ${NC} Algeria"
+                echo -e "  ${WHITE}AR${NC} Argentina        ${WHITE}AM${NC} Armenia          ${WHITE}AU${NC} Australia"
+                echo -e "  ${WHITE}AT${NC} Austria          ${WHITE}AZ${NC} Azerbaijan       ${WHITE}BH${NC} Bahrain"
+                echo -e "  ${WHITE}BD${NC} Bangladesh       ${WHITE}BY${NC} Belarus          ${WHITE}BE${NC} Belgium"
+                echo -e "  ${WHITE}BR${NC} Brazil           ${WHITE}BG${NC} Bulgaria         ${WHITE}KH${NC} Cambodia"
+                echo -e "  ${WHITE}CA${NC} Canada           ${WHITE}CL${NC} Chile            ${WHITE}CN${NC} China"
+                echo -e "  ${WHITE}CO${NC} Colombia         ${WHITE}HR${NC} Croatia          ${WHITE}CU${NC} Cuba"
+                echo -e "  ${WHITE}CY${NC} Cyprus           ${WHITE}CZ${NC} Czech Republic   ${WHITE}DK${NC} Denmark"
+                echo -e "  ${WHITE}EG${NC} Egypt            ${WHITE}EE${NC} Estonia          ${WHITE}ET${NC} Ethiopia"
+                echo -e "  ${WHITE}FI${NC} Finland          ${WHITE}FR${NC} France           ${WHITE}GE${NC} Georgia"
+                echo -e "  ${WHITE}DE${NC} Germany          ${WHITE}GR${NC} Greece           ${WHITE}HK${NC} Hong Kong"
+                echo -e "  ${WHITE}HU${NC} Hungary          ${WHITE}IS${NC} Iceland          ${WHITE}IN${NC} India"
+                echo -e "  ${WHITE}ID${NC} Indonesia        ${WHITE}IR${NC} Iran             ${WHITE}IQ${NC} Iraq"
+                echo -e "  ${WHITE}IE${NC} Ireland          ${WHITE}IL${NC} Israel           ${WHITE}IT${NC} Italy"
+                echo -e "  ${WHITE}JP${NC} Japan            ${WHITE}JO${NC} Jordan           ${WHITE}KZ${NC} Kazakhstan"
+                echo -e "  ${WHITE}KE${NC} Kenya            ${WHITE}KP${NC} North Korea      ${WHITE}KR${NC} South Korea"
+                echo -e "  ${WHITE}KW${NC} Kuwait           ${WHITE}LV${NC} Latvia           ${WHITE}LB${NC} Lebanon"
+                echo -e "  ${WHITE}LT${NC} Lithuania        ${WHITE}LU${NC} Luxembourg       ${WHITE}MY${NC} Malaysia"
+                echo -e "  ${WHITE}MX${NC} Mexico           ${WHITE}MD${NC} Moldova          ${WHITE}MA${NC} Morocco"
+                echo -e "  ${WHITE}NL${NC} Netherlands      ${WHITE}NZ${NC} New Zealand      ${WHITE}NG${NC} Nigeria"
+                echo -e "  ${WHITE}NO${NC} Norway           ${WHITE}PK${NC} Pakistan         ${WHITE}PA${NC} Panama"
+                echo -e "  ${WHITE}PH${NC} Philippines      ${WHITE}PL${NC} Poland           ${WHITE}PT${NC} Portugal"
+                echo -e "  ${WHITE}QA${NC} Qatar            ${WHITE}RO${NC} Romania          ${WHITE}RU${NC} Russia"
+                echo -e "  ${WHITE}SA${NC} Saudi Arabia     ${WHITE}RS${NC} Serbia           ${WHITE}SG${NC} Singapore"
+                echo -e "  ${WHITE}SK${NC} Slovakia         ${WHITE}SI${NC} Slovenia         ${WHITE}ZA${NC} South Africa"
+                echo -e "  ${WHITE}ES${NC} Spain            ${WHITE}SE${NC} Sweden           ${WHITE}CH${NC} Switzerland"
+                echo -e "  ${WHITE}TW${NC} Taiwan           ${WHITE}TH${NC} Thailand         ${WHITE}TR${NC} Turkey"
+                echo -e "  ${WHITE}UA${NC} Ukraine          ${WHITE}AE${NC} UAE              ${WHITE}GB${NC} United Kingdom"
+                echo -e "  ${WHITE}US${NC} United States    ${WHITE}UZ${NC} Uzbekistan       ${WHITE}VN${NC} Vietnam"
+                echo ""
+                echo -e "  ${DIM}Enter codes in Tor format, comma-separated.${NC}"
+                echo -e "  ${DIM}Example: {US},{GB},{DE},{RU},{CN}${NC}\n"
+                echo -ne "  ${BOLD}Countries: ${NC}"
+                read -r _custom_nodes
+                if [ -n "$_custom_nodes" ]; then
+                    EXCLUDE_NODES="$_custom_nodes"
+                    save_config
+                    log_ok "Excluding: $EXCLUDE_NODES"
+                else
+                    log_warn "No input — nothing changed"
+                fi
+                echo -e "  ${DIM}Restart Tor for changes to take effect.${NC}"
+                sleep 2
+                ;;
+            5)
+                EXCLUDE_NODES=""
+                save_config
+                log_ok "All countries allowed"
+                sleep 1
+                ;;
+            0|q|Q) return ;;
+            *)
+                echo -e "\n  ${RED}Invalid choice${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+settings_security() {
+    while true; do
+        clear
+        echo -e "\n${BOLD}${CYAN}═══ Security ═══${NC}\n"
+
+        local hmac_label="${RED}disabled${NC}"
+        if [ "$HMAC_AUTH" -eq 1 ]; then
+            hmac_label="${GREEN}enabled${NC}"
+        fi
+        local cipher_upper="${CIPHER^^}"
+        echo -e "  ${DIM}Cipher:     ${NC}${WHITE}${cipher_upper}${NC}"
+        echo -e "  ${DIM}HMAC auth:  ${NC}${hmac_label}"
+        echo ""
+
+        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Change encryption cipher"
+        echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} HMAC authentication"
+        echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back${NC}"
+        echo ""
+        echo -ne "  ${BOLD}Select: ${NC}"
+        read -r _sec_choice
+
+        case "$_sec_choice" in
+            1) settings_cipher ;;
+            2) settings_hmac ;;
+            0|q|Q) return ;;
+            *)
+                echo -e "\n  ${RED}Invalid choice${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+settings_hmac() {
+    while true; do
+        clear
+        echo -e "\n${BOLD}${CYAN}═══ HMAC Authentication ═══${NC}\n"
+
+        local hmac_label="${RED}disabled${NC}"
+        if [ "$HMAC_AUTH" -eq 1 ]; then
+            hmac_label="${GREEN}enabled${NC}"
+        fi
+        echo -e "  ${DIM}Status:${NC} ${hmac_label}"
+        echo ""
+
+        echo -e "  ${DIM}When enabled, every message sent during a call (voice,${NC}"
+        echo -e "  ${DIM}text, hangup, and all control signals) is signed with${NC}"
+        echo -e "  ${DIM}HMAC-SHA256 derived from your shared secret.${NC}"
+        echo ""
+        echo -e "  ${DIM}A random nonce is included with each message so that${NC}"
+        echo -e "  ${DIM}identical commands produce a unique signature every time.${NC}"
+        echo -e "  ${DIM}This prevents replay attacks — a captured message cannot${NC}"
+        echo -e "  ${DIM}be re-sent to disrupt future calls.${NC}"
+        echo ""
+        echo -e "  ${DIM}On the receiving end, any message with an invalid or${NC}"
+        echo -e "  ${DIM}missing signature is silently dropped. An attacker who${NC}"
+        echo -e "  ${DIM}compromises the Tor circuit but does not have the shared${NC}"
+        echo -e "  ${DIM}secret cannot inject commands like HANGUP to disconnect${NC}"
+        echo -e "  ${DIM}your call or forge audio and text messages.${NC}"
+        echo ""
+        echo -e "  ${YELLOW}Both parties must have HMAC enabled for calls to work.${NC}"
+        echo -e "  ${YELLOW}Not compatible with versions prior to 1.1.3.${NC}"
+        echo ""
+
+        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Turn on"
+        echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Turn off"
+        echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back${NC}"
+        echo ""
+        echo -ne "  ${BOLD}Select: ${NC}"
+        read -r _hmac_choice
+
+        case "$_hmac_choice" in
+            1)
+                if [ "$HMAC_AUTH" -eq 1 ]; then
+                    log_info "HMAC authentication is already enabled"
+                else
+                    HMAC_AUTH=1
+                    save_config
+                    log_ok "HMAC authentication enabled"
+                    if [ "$CALL_ACTIVE" -eq 1 ]; then
+                        echo -e "  ${YELLOW}Takes effect on the next call.${NC}"
+                    fi
+                fi
+                sleep 1
+                ;;
+            2)
+                if [ "$HMAC_AUTH" -eq 0 ]; then
+                    log_info "HMAC authentication is already disabled"
+                else
+                    HMAC_AUTH=0
+                    save_config
+                    log_ok "HMAC authentication disabled"
+                    if [ "$CALL_ACTIVE" -eq 1 ]; then
+                        echo -e "  ${YELLOW}Takes effect on the next call.${NC}"
+                    fi
+                fi
+                sleep 1
                 ;;
             0|q|Q) return ;;
             *)
