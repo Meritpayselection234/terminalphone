@@ -23,7 +23,9 @@ Verison 1.0.3 2-18-26
 
 Remove the old unused encrypt/decrcypt stream functions. These were implemented during testing of a full duplex version.
 The full duplex version unusable because of tor latency. 
-We use encrypt file and decrypt file since v1.0.0 so this is not needed. Encrypt/Decrypt stream function also used -no-salt tag which means identical encryption would result in the same ciphertext. This is less of an issue for passing audio. You would likely never produce the same ciphertext twice in a audio stream due to entryopy from the raw recordings. But becasue chat is implemented, no-salt is weak.
+We use encrypt file and decrypt file since v1.0.0 so this is not needed. 
+Encrypt/Decrypt stream function also used -no-salt tag which means identical encryption would result in the same ciphertext. This is less of an issue for passing audio. 
+You would likely never produce the same ciphertext twice in a audio stream due to entryopy from the raw recordings. But becasue chat is implemented, no-salt is weak.
 
 Version 1.0.4 2-19-26
 Integrate snowflake bridge for additional censorship resistance. 
@@ -52,7 +54,8 @@ Linux hold-to-talk debounce. Dynamic stty timeout prevents false release detecti
 
 New features:
 
-Auto-listen. New setting that starts a background socat listener when Tor boots. Incoming calls are detected automatically from the main menu without needing to select "Listen for calls". After a call ends, the listener restarts.
+Auto-listen. New setting that starts a background socat listener when Tor boots. Incoming calls are detected automatically from the main menu without needing to select "Listen for calls". 
+After a call ends, the listener restarts.
 
 Configurable PTT key. New setting to change the push-to-talk key from the default spacebar to any key. The main menu status bar reflects the current PTT key.
 
@@ -66,7 +69,8 @@ Version 1.0.8 2-19-26
 
 Termux security improvement. Replaced termux-media-player with sox play for audio playback on Termux. 
 
-The old approach handed decrypted audio files to Android's MediaPlayer system service, which could index them in the MediaStore database and expose file paths to other apps with media permissions. 
+The old approach handed decrypted audio files to Android's MediaPlayer system service, which could 
+index them in the MediaStore database and expose file paths to other apps with media permissions. 
 
 The new approach plays audio entirely within Termux's process using sox. On the receive path, decrypted audio is piped directly from opusdec to sox play without ever touching disk. 
 
@@ -74,46 +78,72 @@ No Android system service is involved and no IPC occurs. This change is fully ba
 
 Version 1.0.9 2-20-26
 
-Volume PTT (Termux only, experimental). New setting in the settings menu that enables double-tap Volume Down to toggle PTT recording during a call. A background monitor polls termux-volume and detects rapid volume decreases as a double-tap trigger. Volume is automatically restored to its original level after each detection so the button never bottoms out.
+Volume PTT (Termux only, experimental). New setting in the settings menu that enables double-tap Volume Down to toggle PTT recording during a call. 
+A background monitor polls termux-volume and detects rapid volume decreases as a double-tap trigger. 
+Volume is automatically restored to its original level after each detection so the button never bottoms out.
 
 The feature requires jq for parsing the termux-volume JSON output. jq is not installed by default — the user is prompted to install it when enabling the feature.
 
-Dependency installer now prompts before installing. The main menu option 7 (Install Dependencies) now shows missing packages and asks for confirmation before proceeding, instead of auto-installing.
+Dependency installer now prompts before installing. 
+The main menu option 7 (Install Dependencies) now shows missing packages and asks for confirmation before proceeding, instead of auto-installing.
 
 Version 1.1.0 2-20-26
 
-Passphrase-protected shared secret. The shared secret is no longer stored as plaintext by default. When setting a new secret, the user is prompted to encrypt it with a passphrase. The secret is encrypted using AES-256-CBC with 100,000 PBKDF2 iterations. On subsequent launches, the user enters the passphrase to unlock the secret. If the passphrase is skipped, the secret falls back to plaintext storage. Existing plaintext secrets are automatically detected and the user is offered a one-time migration to encrypted storage.
+Passphrase-protected shared secret. The shared secret is no longer stored as plaintext by default.
+When setting a new secret, the user is prompted to encrypt it with a passphrase. 
+The secret is encrypted using AES-256-CBC with 100,000 PBKDF2 iterations. On subsequent launches, the user enters the passphrase to unlock the secret. 
+If the passphrase is skipped, the secret falls back to plaintext storage. Existing plaintext secrets are automatically detected and the user is offered a one-time migration to encrypted storage.
 
-Process visibility fix. All openssl invocations now pass the shared secret via file descriptor (fd:3) instead of the command line (-pass pass:). Previously, the secret was visible to any local process via /proc/<pid>/cmdline while openssl was running. The secret is now passed through a kernel pipe buffer that is not exposed in the process table. This hardens against local privilege escalation and process snooping. Fully backwards compatible — the encrypted output is byte-identical.
+Process visibility fix. All openssl invocations now pass the shared secret via file descriptor (fd:3) instead of the command line (-pass pass:). 
+Previously, the secret was visible to any local process via /proc/<pid>/cmdline while openssl was running. The secret is now passed through a kernel pipe buffer that is not exposed in the process table. 
+This hardens against local privilege escalation and process snooping. Fully backwards compatible — the encrypted output is byte-identical.
 
 Version 1.1.1 2-23-26
 
-QR code for onion address. Option 3 (Show my onion address) now offers to display a scannable QR code of your .onion address directly in the terminal. If qrencode is not installed, the user is prompted to install it (libqrencode on Termux, qrencode on apt/dnf/pacman). The QR code renders on the terminal's alternate screen buffer and is destroyed when dismissed — it does not persist in scroll history.
+QR code for onion address. Option 3 (Show my onion address) now offers to display a scannable QR code of your .onion address directly in the terminal. 
+If qrencode is not installed, the user is prompted to install it (libqrencode on Termux, qrencode on apt/dnf/pacman). 
+The QR code renders on the terminal's alternate screen buffer and is destroyed when dismissed — it does not persist in scroll history.
 
-Opaque temporary filenames. All temporary audio, text, and encryption files now use a generic .tmp extension instead of revealing extensions (.opus, .m4a, .raw, .bin, .txt). A file left on disk no longer reveals what type of data it contains.
+Opaque temporary filenames. All temporary audio, text, and encryption files now use a generic .tmp extension instead of revealing extensions (.opus, .m4a, .raw, .bin, .txt). 
+A file left on disk no longer reveals what type of data it contains.
 
-Random file identifiers. The uid() function now generates random hex bytes from /dev/urandom instead of nanosecond timestamps. Temporary filenames no longer leak the exact time a message was sent or received. This eliminates timing metadata from the filesystem.
+Random file identifiers. The uid() function now generates random hex bytes from /dev/urandom instead of nanosecond timestamps. 
+Temporary filenames no longer leak the exact time a message was sent or received. 
+This eliminates timing metadata from the filesystem.
 
 Version 1.1.2 2-24-26
 
-Circuit hop display. During a call, the header now shows the Tor circuit path with relay names and full country names. The display lists each hop vertically — Guard, Relay, and Rendezvous — resolved via the Tor control port. Circuits auto-refresh every 60 seconds to stay accurate if Tor rotates the path mid-call.
+Circuit hop display. During a call, the header now shows the Tor circuit path with relay names and full country names. 
+The display lists each hop vertically — Guard, Relay, and Rendezvous — resolved via the Tor control port. 
+Circuits auto-refresh every 60 seconds to stay accurate if Tor rotates the path mid-call.
 
-Tor Settings submenu. New option 8 in Settings opens a Tor Settings submenu. Currently contains the circuit display toggle (opt-in). Enabling circuit display adds ControlPort with cookie authentication to the torrc. Requires a Tor restart after toggling.
+Tor Settings submenu. New option 8 in Settings opens a Tor Settings submenu. 
+Currently contains the circuit display toggle (opt-in). 
+Enabling circuit display adds ControlPort with cookie authentication to the torrc. Requires a Tor restart after toggling.
 
 GeoIP auto-detection. The torrc now includes explicit GeoIPFile and GeoIPv6File directives, resolved automatically from Termux ($PREFIX/share/tor), standard Linux (/usr/share/tor), or local builds (/usr/local/share/tor).
 
 I plan on expanding this submenu to take advantage and manage all the tor configurations available in the torrc. Will potentially migrate the snowflake menu to this submenu as well.
 
-Improved the listen for calls option. You can now stop listening and it will bring you back to the menu, or you can start the autolistener. Previously you could only stop with ctrl+c which would also kill tor and the application entirely.
+Improved the listen for calls option. You can now stop listening and it will bring you back to the menu, or you can start the autolistener. 
+Previously you could only stop with ctrl+c which would also kill tor and the application entirely.
 
 Version 1.1.3 2-24-26
 
-Exclude countries from Tor circuits. New option in Settings → Tor Settings → Exclude countries. Presets for Five Eyes (US, GB, CA, AU, NZ), Nine Eyes (+ DK, FR, NL, NO), and Fourteen Eyes (+ DE, BE, IT, SE, ES) intelligence alliances. Custom country codes can also be entered manually. Uses ExcludeNodes with StrictNodes in the torrc. The current exclusion list is displayed in the Tor Settings status line. Requires a Tor restart after changing.
+Exclude countries from Tor circuits. New option in Settings → Tor Settings → Exclude countries. Presets for Five Eyes (US, GB, CA, AU, NZ), Nine Eyes (+ DK, FR, NL, NO), and Fourteen Eyes (+ DE, BE, IT, SE, ES) intelligence alliances. 
+Custom country codes can also be entered manually. Uses ExcludeNodes with StrictNodes in the torrc. 
+The current exclusion list is displayed in the Tor Settings status line. Requires a Tor restart after changing.
 
-HMAC protocol authentication. New optional feature in Settings → Security → HMAC authentication. When enabled, every protocol message (voice, text, hangup, and all control signals) is signed with HMAC-SHA256 derived from the shared secret. A random nonce is included with each message so that identical commands produce a unique signature every time. Seen nonces are tracked per call and duplicates are rejected, preventing replay attacks. The HMAC setting is frozen at call start so both send and receive paths always agree; mid-call changes take effect on the next call. Off by default for backwards compatibility. Both parties must enable HMAC for calls to work. Not compatible with versions prior to 1.1.3.
+HMAC protocol authentication. New optional feature in Settings → Security → HMAC authentication. 
+When enabled, every protocol message (voice, text, hangup, and all control signals) is signed with HMAC-SHA256 derived from the shared secret. 
+A random nonce is included with each message so that identical commands produce a unique signature every time. Seen nonces are tracked per call and duplicates are rejected, preventing replay attacks. 
+The HMAC setting is frozen at call start so both send and receive paths always agree; mid-call changes take effect on the next call. Off by default for backwards compatibility. 
+Both parties must enable HMAC for calls to work. Not compatible with versions prior to 1.1.3.
 
-Security submenu. New option 7 in Settings opens a Security submenu. Contains the encryption cipher configuration (moved from main settings) and the HMAC authentication toggle.
+Security submenu. New option 7 in Settings opens a Security submenu. 
+Contains the encryption cipher configuration (moved from main settings) and the HMAC authentication toggle.
 
 Snowflake bridge moved to Tor Settings submenu (option 3) from the main Settings menu.
 
-Settings menu reorganized. Encryption cipher and Snowflake moved to submenus. Menu options renumbered accordingly.
+Settings menu reorganized. Encryption cipher and Snowflake moved to submenus. 
+Menu options renumbered accordingly.
