@@ -147,3 +147,19 @@ Snowflake bridge moved to Tor Settings submenu (option 3) from the main Settings
 
 Settings menu reorganized. Encryption cipher and Snowflake moved to submenus. 
 Menu options renumbered accordingly.
+
+Version 1.1.4 2-27-26
+
+First bootstrap detection. When Tor starts for the first time (no cached consensus data and no existing onion address), a notice is displayed explaining that the initial bootstrap takes longer because Tor needs to download network consensus. The message does not appear on subsequent launches.
+
+Increased first bootstrap timeout. The bootstrap timeout is extended from 120 seconds to 300 seconds on the first run, giving Tor enough time to download the full consensus from scratch.
+
+Remote PTT status indicator. The call screen now shows a static "Remote" status row that displays "Idle" (green) when the remote party is not recording and "● Recording" (red) when they are actively recording. The indicator resets to Idle as soon as audio data arrives, before playback begins, so it does not stay lit during audio playback. The PTT_START protocol message is now sent when recording begins (previously it was defined in the protocol but never sent).
+
+QR code http:// stripping. Some QR scanner apps auto-prepend http:// or https:// to scanned text. The QR code display now includes a note warning about this behavior. Both the interactive call menu and CLI call command now strip http:// and https:// prefixes from pasted addresses before dialing.
+
+Fixed duplicate shutdown message. The "shut down cleanly" message was printed twice on exit because cleanup() was called explicitly and then again by the EXIT trap. Removed the redundant explicit call.
+
+PTT chime notification. New submenu in Settings (option 6) for configuring a notification sound that plays when the remote party starts recording. Five built-in presets generated with sox: tone (short beep), double (two quick beeps), chirp (ascending sweep), ding (bell with decay), and click (percussive noise burst). Option to record a custom 2-second chime using the device microphone, with a 3-2-1 countdown and automatic playback preview. The selected chime is previewed when chosen. Custom recordings are saved to the data directory. 
+
+Settings menu renumbered: Tor settings moved to option 7, Security to option 8.
