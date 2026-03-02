@@ -52,6 +52,9 @@ TerminalPhone is a single, self-contained Bash script that provides anonymous, e
 - **Circuit Hop Display** -- Opt-in display of your Tor circuit path during calls, showing relay names and full country names. Auto-refreshes every 60 seconds. Configurable via Settings → Tor Settings.
 - **Exclude Countries** -- Exclude specific countries from your Tor circuits. Presets for Five Eyes, Nine Eyes, and Fourteen Eyes alliances, or enter custom country codes. Uses `ExcludeNodes` with `StrictNodes` in the torrc.
 - **HMAC Protocol Authentication** -- Optional HMAC-SHA256 signing of all protocol messages (voice, text, control signals) using the shared secret. A random nonce is included per message, and seen nonces are tracked to reject replays. Unsigned, forged, or replayed messages are silently dropped. HMAC state is frozen at call start to prevent mid-call desync. Configurable via Settings → Security.
+- **Relay Mode (Group Bridge)** -- Run a zero-knowledge relay that bridges N anonymous callers. The relay forwards encrypted audio and chat without decrypting, requires no shared secret or audio hardware. Clients auto-detect relay mode via `RELAY:1` handshake and display live group caller count. One caller leaving does not disconnect others. Operator dashboard shows caller count, uptime, and data throughput.
+- **Single-Hop Tor Mode** -- Optional reduced-latency mode for relay operators. Uses 1 Tor hop instead of 3 for the hidden service, sacrificing server anonymity for lower latency. Ideal for relay operators who don't need to hide their own IP.
+- **Port Configuration** -- Configure listen port and SOCKS port together via Settings → Tor Settings. Enables running multiple instances on the same device with separate Tor processes. Primarily useful for relay operators who also want to join their own group call -- run the relay on one instance, change the SOCKS port on a second instance, and dial in as a caller.
 - **Cross-Platform** -- Runs on standard Linux distributions and Android via Termux. Platform-specific audio backends are handled transparently.
 - **No Root Required** -- PTT input uses terminal raw mode. No special permissions or kernel modules needed.
 - **Single Script** -- One Bash file. No build system, no runtime, no framework.
@@ -110,7 +113,7 @@ This installs the command-line utilities that communicate with the Termux:API ap
 **Step 4: Run TerminalPhone**
 
 ```bash
-git clone <repository-url>
+git clone https://gitlab.com/here_forawhile/terminalphone.git
 cd terminalphone
 bash terminalphone.sh
 ```
@@ -160,6 +163,7 @@ Both parties must have Tor running and the same shared secret configured before 
 10  Restart Tor               Stop and restart Tor
 11  Rotate onion address      Generate a new .onion address (destroys the old one)
 12  Settings                  Configure Opus quality, PTT chime, Snowflake, auto-listen, PTT key, voice changer, security, Tor settings
+13  Relay mode                Start a zero-knowledge group bridge for N callers
  0  Quit                      Stop Tor and exit
 ```
 
@@ -194,6 +198,7 @@ bash terminalphone.sh test          # Audio loopback test
 bash terminalphone.sh status        # Show status
 bash terminalphone.sh listen        # Listen for incoming calls
 bash terminalphone.sh call ADDRESS  # Call a .onion address
+bash terminalphone.sh relay         # Start relay mode (group bridge)
 ```
 
 ---
@@ -232,6 +237,8 @@ The wire protocol is line-based text over a TCP connection:
 | `MSG:<base64>` | Encrypted text message |
 | `HANGUP` | Sender is disconnecting |
 | `PING` | Keepalive signal |
+| `RELAY:1` | Relay greeting -- sent by relay on connect, triggers group mode |
+| `GROUP:<n>` | Group size update -- broadcast by relay when callers join or leave |
 
 On Termux, an additional conversion step handles Android's native M4A recording format, using `ffmpeg` to convert to raw PCM before Opus encoding.
 
@@ -256,6 +263,19 @@ On Termux, an additional conversion step handles Android's native M4A recording 
 - The shared secret must be exchanged out-of-band through a secure channel (in person, encrypted messaging, etc.).
 - There is no forward secrecy. If the shared secret is compromised, all past and future communications using that secret can be decrypted.
 - The protocol does not protect against a compromised endpoint. If either device is compromised, the attacker has access to the plaintext audio.
+
+**Relay mode security:** The relay is architecturally zero-knowledge. It never possesses the shared secret and cannot decrypt any content. Audio data flows through kernel pipe buffers (FIFOs) that exist only in memory -- nothing is written to disk. When the relay stops, all temporary files are deleted. The relay operator cannot determine what was said, who the callers are, or read any messages. The relay filters all control signals (HANGUP, ID:, CIPHER:, PTT_START, PTT_STOP) and only forwards AUDIO:, MSG:, and PING. A global passive adversary could perform traffic correlation analysis to associate callers with the relay, but message content remains opaque.
+
+**Relay capacity:** The primary bottleneck is Tor bandwidth. Tor hidden service throughput is highly variable and depends on circuit quality, relay congestion, and geographic distance. A typical 10-second voice message is ~20KB encrypted, and each transmission fans out to N-1 listeners.
+
+| Callers | Outbound per message | Expected experience |
+|---|---|---|
+| 2--3 | 20--40KB | Reliable on most connections |
+| 3--5 | 40--80KB | Good on stable circuits, delays possible on mobile data |
+| 5--10 | 80--180KB | Pushing limits, noticeable delays between transmissions |
+| 10+ | 180KB+ | Unreliable, significant queuing and potential message loss |
+
+Realistic capacity is **3--5 callers** for a relay running on a phone (Termux), or **5--10 callers** on a dedicated Linux machine with a stable connection. Relays running on mobile devices face additional constraints: mobile data adds latency on top of Tor, Android may kill background Termux processes to reclaim memory, and battery drain increases with each connected caller. Tor circuit bandwidth can vary from 50KB/s to 500KB/s depending on path quality, and circuits can degrade or rotate mid-session. Single-hop mode improves throughput but does not eliminate Tor relay congestion. These estimates assume the PTT model where only one person transmits at a time -- simultaneous transmissions would degrade performance further. Callers in a group call should consider lowering their Opus bitrate (Settings → Opus encoding) to reduce message sizes and lighten the load on the relay.
 
 ---
 
@@ -287,6 +307,7 @@ Default audio parameters (defined at the top of the script):
 | `EXCLUDE_NODES` | (empty) | Tor ExcludeNodes country list (e.g. `{US},{GB}`) |
 | `HMAC_AUTH` | 0 | HMAC-sign all protocol messages (optional, both sides must match) |
 | `PTT_CHIME` | off | PTT notification chime preset (off, tone, double, chirp, ding, click, custom) |
+| `SINGLE_HOP` | 0 | Single-hop Tor mode for lower latency (disables server anonymity) |
 | `SAMPLE_RATE` | 8000 | Audio sample rate in Hz |
 | `CHUNK_DURATION` | 1 | Duration for audio test chunks in seconds |
 
@@ -346,6 +367,8 @@ If the script hangs after pressing Q, press Ctrl+C to force cleanup and return t
 [MIRROR V1.1.3](https://bin.disroot.org/?b02658801518aaa7#JE6CsBLWUwAnTdBqeHgeXL7QF5UExgi9rnygcfyMZjCJ)
 
 [MIRROR V1.1.4](https://bin.disroot.org/?d31248fc44c287a0#HQELFWFEMpM9kfTZSGDXTdGFMVKTejox5CajF9Vm4Www)
+
+[MIRROR V1.1.5](https://bin.disroot.org/?284b723ed6aad15f#8VCrrri6yRpdg3uVDSY94wpx7LYkw5uYhm4Vbhka83sM)
 
 ---
 
