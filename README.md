@@ -370,6 +370,8 @@ If the script hangs after pressing Q, press Ctrl+C to force cleanup and return t
 
 [MIRROR V1.1.5](https://bin.disroot.org/?284b723ed6aad15f#8VCrrri6yRpdg3uVDSY94wpx7LYkw5uYhm4Vbhka83sM)
 
+[MIRROR V1.1.5.1](https://bin.disroot.org/?26aaef1eff20c271#4GxQQPSDhrszTu1RmERySNVqD2fZW5GZwm3JeL1parpB)
+
 ---
 
 ## License
