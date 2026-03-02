@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIGURATION
 #=============================================================================
 APP_NAME="TerminalPhone"
-VERSION="1.1.5"
+VERSION="1.1.5.1"
 BASE_DIR="$(dirname "$(readlink -f "$0")")"
 DATA_DIR="$BASE_DIR/.terminalphone"
 TOR_DIR="$DATA_DIR/tor_data"
@@ -1520,6 +1520,17 @@ done
 exec 3>&-
 kill $WR_PID 2>/dev/null
 wait $WR_PID 2>/dev/null
+
+# Accumulate this caller's stats into persistent totals before removing
+if [ -f "$RELAY_DIR/stats_${ID}" ]; then
+    read -r _fi _fo < "$RELAY_DIR/stats_${ID}" 2>/dev/null || { _fi=0; _fo=0; }
+    (
+        flock 9
+        _ti=0; _to=0
+        [ -f "$RELAY_DIR/stats_total" ] && read -r _ti _to < "$RELAY_DIR/stats_total" 2>/dev/null
+        echo "$((_ti + ${_fi:-0})) $((_to + ${_fo:-0}))" > "$RELAY_DIR/stats_total"
+    ) 9>"$RELAY_DIR/.stats_lock"
+fi
 rm -f "$OUTFIFO" "$RELAY_DIR/client_${ID}" "$RELAY_DIR/stats_${ID}"
 
 # Broadcast updated count (one fewer)
@@ -1554,7 +1565,7 @@ RELAY_HANDLER_EOF
         local uptime=$(( $(date +%s) - start_time ))
         local mins=$(( uptime / 60 ))
         local secs=$(( uptime % 60 ))
-        # Sum data stats from all handlers
+        # Sum data stats from all handlers + accumulated totals from disconnected callers
         local total_in=0 total_out=0
         for _sf in "$relay_dir"/stats_*; do
             [ -f "$_sf" ] || continue
