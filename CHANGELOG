@@ -223,3 +223,7 @@ The monitoring loop sums both active handler stats and accumulated totals so the
 Periodic group count broadcast. The relay now broadcasts GROUP:N to all clients every ~10 seconds 
 from the monitoring loop, in addition to on join/leave events. Clients cache the last received count 
 so that returning from mid-call settings displays the correct group size immediately instead of "connecting...".
+
+Version 1.1.6
+
+MacOS Supported Now.
