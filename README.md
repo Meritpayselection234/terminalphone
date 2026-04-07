@@ -11,6 +11,7 @@ TerminalPhone is a single, self-contained Bash script that provides anonymous, e
 - [Features](#features)
 - [Installation](#installation)
   - [Linux](#linux)
+  - [macOS](#macos)
   - [Termux (Android)](#termux-android)
 - [Quick Start](#quick-start)
 - [Usage](#usage)
@@ -55,7 +56,7 @@ TerminalPhone is a single, self-contained Bash script that provides anonymous, e
 - **Relay Mode (Group Bridge)** -- Run a zero-knowledge relay that bridges N anonymous callers. The relay forwards encrypted audio and chat without decrypting, requires no shared secret or audio hardware. Clients auto-detect relay mode via `RELAY:1` handshake and display live group caller count. One caller leaving does not disconnect others. Operator dashboard shows caller count, uptime, and data throughput.
 - **Single-Hop Tor Mode** -- Optional reduced-latency mode for relay operators. Uses 1 Tor hop instead of 3 for the hidden service, sacrificing server anonymity for lower latency. Ideal for relay operators who don't need to hide their own IP.
 - **Port Configuration** -- Configure listen port and SOCKS port together via Settings → Tor Settings. Enables running multiple instances on the same device with separate Tor processes. Primarily useful for relay operators who also want to join their own group call -- run the relay on one instance, change the SOCKS port on a second instance, and dial in as a caller.
-- **Cross-Platform** -- Runs on standard Linux distributions and Android via Termux. Platform-specific audio backends are handled transparently.
+- **Cross-Platform** -- Runs on standard Linux distributions, macOS, and Android via Termux. Platform-specific audio backends are handled transparently.
 - **No Root Required** -- PTT input uses terminal raw mode. No special permissions or kernel modules needed.
 - **Single Script** -- One Bash file. No build system, no runtime, no framework.
 
@@ -85,6 +86,28 @@ Select option **7** from the menu to install all dependencies automatically. The
 | `socat` | Bidirectional TCP relay through Tor SOCKS proxy |
 | `openssl` | AES-256-CBC encryption and decryption |
 | `alsa-utils` | Audio recording and playback (`arecord`, `aplay`) |
+
+### macOS
+
+``` bash
+
+git clone https://gitlab.com/here_forawhile/terminalphone.git
+cd terminalphone
+bash terminalphone.sh
+
+```
+
+Select option **7** to install all dependencies automatically. If [Homebrew](https://brew.sh) is not installed, the script will install it first, then install the following packages:
+
+| Package | Purpose |
+|---|---|
+| `tor` | Onion routing and hidden service |
+| `opus-tools` | Voice compression (Opus codec) |
+| `sox` | Audio recording and playback (`rec`, `play`) |
+| `socat` | Bidirectional TCP relay through Tor SOCKS proxy |
+| `openssl` | AES-256-CBC encryption and decryption |
+
+**Note:** macOS uses `sox` for both recording (`rec`) and playback (`play`) instead of ALSA. No additional audio packages are needed.
 
 ### Termux (Android)
 
