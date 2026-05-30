@@ -111,6 +111,28 @@ to_lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 # Strip control characters and ANSI escape sequences from untrusted input
 sanitize_str() { echo "$1" | tr -d '\000-\011\013-\037\177' | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g'; }
 
+# Detect best ALSA capture device for Linux (PulseAudio/PipeWire > ALSA default)
+detect_capture_device() {
+    if arecord -D pulse -l &>/dev/null; then
+        echo "pulse"
+    elif arecord -D pipewire -l &>/dev/null; then
+        echo "pipewire"
+    else
+        echo "default"
+    fi
+}
+
+# Detect best ALSA playback device for Linux (PulseAudio/PipeWire > ALSA default)
+detect_playback_device() {
+    if aplay -D pulse -l &>/dev/null; then
+        echo "pulse"
+    elif aplay -D pipewire -l &>/dev/null; then
+        echo "pipewire"
+    else
+        echo "default"
+    fi
+}
+
 # Portable file size (macOS stat uses -f%z, GNU stat uses -c%s)
 file_size() {
     if [ $IS_MACOS -eq 1 ]; then
@@ -938,7 +960,7 @@ audio_record() {
     if [ $IS_TERMUX -eq 1 ]; then
         local tmp_rec="$AUDIO_DIR/tmrec_$(uid).tmp"
         rm -f "$tmp_rec"
-        termux-microphone-record -l "$((duration + 1))" -r "$SAMPLE_RATE" -f "$tmp_rec" &>/dev/null
+        termux-microphone-record -l "$((duration + 1))" -r "$SAMPLE_RATE" -o "$tmp_rec" &>/dev/null
         sleep "$duration"
         termux-microphone-record -q &>/dev/null || true
         sleep 0.5
@@ -950,7 +972,9 @@ audio_record() {
     elif [ $IS_MACOS -eq 1 ]; then
         rec -q -t raw -r "$SAMPLE_RATE" -e signed -b 16 -c 1 "$outfile" trim 0 "$duration" 2>/dev/null
     else
-        arecord -f S16_LE -r "$SAMPLE_RATE" -c 1 -t raw -d "$duration" \
+        local _dev
+        _dev=$(detect_capture_device)
+        arecord -D "$_dev" -f S16_LE -r "$SAMPLE_RATE" -c 1 -t raw -d "$duration" \
             -q "$outfile" 2>/dev/null
     fi
 }
@@ -963,7 +987,7 @@ start_recording() {
     if [ $IS_TERMUX -eq 1 ]; then
         REC_FILE="$AUDIO_DIR/msg_${_id}.tmp"
         rm -f "$REC_FILE"
-        termux-microphone-record -l 120 -r "$SAMPLE_RATE" -f "$REC_FILE" &>/dev/null &
+        termux-microphone-record -l 120 -r "$SAMPLE_RATE" -o "$REC_FILE" &>/dev/null &
         REC_PID=$!
     elif [ $IS_MACOS -eq 1 ]; then
         REC_FILE="$AUDIO_DIR/msg_${_id}.tmp"
@@ -971,7 +995,9 @@ start_recording() {
         REC_PID=$!
     else
         REC_FILE="$AUDIO_DIR/msg_${_id}.tmp"
-        arecord -f S16_LE -r "$SAMPLE_RATE" -c 1 -t raw -q "$REC_FILE" 2>/dev/null &
+        local _dev
+        _dev=$(detect_capture_device)
+        arecord -D "$_dev" -f S16_LE -r "$SAMPLE_RATE" -c 1 -t raw -q "$REC_FILE" 2>/dev/null &
         REC_PID=$!
     fi
 }
@@ -1091,8 +1117,10 @@ audio_play() {
     local rate="${2:-48000}"
 
     if [ $IS_TERMUX -eq 0 ] && [ $IS_MACOS -eq 0 ]; then
-        # Linux: use ALSA aplay
-        aplay -f S16_LE -r "$rate" -c 1 -q "$infile" 2>/dev/null
+        # Linux: use ALSA aplay with detected device
+        local _pdev
+        _pdev=$(detect_playback_device)
+        aplay -D "$_pdev" -f S16_LE -r "$rate" -c 1 -q "$infile" 2>/dev/null
     else
         # macOS / Termux: use sox play
         play -q -t raw -r "$rate" -e signed -b 16 -c 1 "$infile" 2>/dev/null || true
@@ -1110,9 +1138,11 @@ play_chunk() {
         opusdec --quiet --rate 48000 "$opus_file" - 2>/dev/null | \
             play -q -t raw -r 48000 -e signed -b 16 -c 1 - 2>/dev/null || true
     else
-        # Linux: pipe decode directly to aplay
+        # Linux: pipe decode directly to aplay with detected device
+        local _pdev
+        _pdev=$(detect_playback_device)
         opusdec --quiet --rate 48000 "$opus_file" - 2>/dev/null | \
-            aplay -f S16_LE -r 48000 -c 1 -q 2>/dev/null || true
+            aplay -D "$_pdev" -f S16_LE -r 48000 -c 1 -q 2>/dev/null || true
     fi
 }
 
