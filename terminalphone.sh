@@ -108,6 +108,9 @@ ORIGINAL_STTY=""
 to_upper() { echo "$1" | tr '[:lower:]' '[:upper:]'; }
 to_lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
+# Strip control characters and ANSI escape sequences from untrusted input
+sanitize_str() { echo "$1" | tr -d '\000-\011\013-\037\177' | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g'; }
+
 # Portable file size (macOS stat uses -f%z, GNU stat uses -c%s)
 file_size() {
     if [ $IS_MACOS -eq 1 ]; then
@@ -1563,7 +1566,7 @@ while IFS= read -r line; do
     case "$line" in *"|"*) local_payload="${line%|*}"; local_payload="${local_payload#*:}" ;; esac
     # Filter: only forward AUDIO:, MSG:, PING, and GROUP:
     case "$local_payload" in
-        AUDIO:*|MSG:*|PING|GROUP:*) ;;
+        AUDIO:*|MSG:*|PING) ;;
         *) continue ;;
     esac
     for f in "$RELAY_DIR"/out_*.fifo; do
@@ -1981,7 +1984,8 @@ in_call_session() {
                     if [ ! -f "$relay_flag_file" ]; then
                         touch "$relay_flag_file"
                     fi
-                    local _gcount="${line#GROUP:}"
+                    local _gcount
+                    _gcount=$(sanitize_str "${line#GROUP:}")
                     # Cache count for header redraws (e.g., after mid-call settings)
                     echo "$_gcount" > "$DATA_DIR/run/group_count_$$"
                     printf '\033[s' >&2
@@ -2021,7 +2025,8 @@ in_call_session() {
                         ;;
                     CIPHER:*)
                         # Remote side sent/changed their cipher — save and update display
-                        local rc="${line#CIPHER:}"
+                        local rc
+                        rc=$(sanitize_str "${line#CIPHER:}")
                         echo "$rc" > "$remote_cipher_file" 2>/dev/null || true
                         # Read current local cipher from runtime file
                         local _cur_cipher="$CIPHER"
