@@ -49,6 +49,8 @@ EXCLUDE_NODES=""      # Tor ExcludeNodes (comma-separated country codes, e.g. {U
 HMAC_AUTH=0           # HMAC-sign all protocol messages (off by default)
 SINGLE_HOP=0          # Single-hop hidden service (off by default, sacrifices server anonymity for speed)
 PTT_CHIME="off"       # PTT notification chime (off, tone, double, chirp, ding, click, custom)
+ALSA_DEV_CAPTURE="default"  # ALSA capture device (Linux only)
+ALSA_DEV_PLAYBACK="default" # ALSA playback device (Linux only)
 
 # Custom voice effect parameters (used when VOICE_EFFECT=custom)
 VOICE_PITCH=0         # Pitch shift in cents (-600 to +600, 0=off)
@@ -113,24 +115,12 @@ sanitize_str() { echo "$1" | tr -d '\000-\011\013-\037\177' | sed 's/\x1b\[[0-9;
 
 # Detect best ALSA capture device for Linux (PulseAudio/PipeWire > ALSA default)
 detect_capture_device() {
-    if arecord -D pulse -l &>/dev/null; then
-        echo "pulse"
-    elif arecord -D pipewire -l &>/dev/null; then
-        echo "pipewire"
-    else
-        echo "default"
-    fi
+    echo "${ALSA_DEV_CAPTURE:-default}"
 }
 
 # Detect best ALSA playback device for Linux (PulseAudio/PipeWire > ALSA default)
 detect_playback_device() {
-    if aplay -D pulse -l &>/dev/null; then
-        echo "pulse"
-    elif aplay -D pipewire -l &>/dev/null; then
-        echo "pipewire"
-    else
-        echo "default"
-    fi
+    echo "${ALSA_DEV_PLAYBACK:-default}"
 }
 
 # Portable file size (macOS stat uses -f%z, GNU stat uses -c%s)
@@ -297,6 +287,8 @@ EXCLUDE_NODES="$EXCLUDE_NODES"
 HMAC_AUTH=$HMAC_AUTH
 SINGLE_HOP=$SINGLE_HOP
 PTT_CHIME="$PTT_CHIME"
+ALSA_DEV_CAPTURE="$ALSA_DEV_CAPTURE"
+ALSA_DEV_PLAYBACK="$ALSA_DEV_PLAYBACK"
 EOF
 }
 
@@ -316,12 +308,12 @@ install_deps() {
     local pkg_names_apt="tor opus-tools sox socat openssl alsa-utils"
     local pkg_names_dnf="tor opus-tools sox socat openssl alsa-utils"
     local pkg_names_pacman="tor opus-tools sox socat openssl alsa-utils"
-    local pkg_names_pkg="tor opus-tools sox socat openssl-tool ffmpeg termux-api"
+    local pkg_names_pkg="tor opus-tools sox socat openssl-tool ffmpeg termux-api pulseaudio"
     local pkg_names_brew="tor opus-tools sox socat openssl"
 
     # Shared deps + platform-specific
     if [ $IS_TERMUX -eq 1 ]; then
-        all_deps=(tor opusenc opusdec sox socat openssl ffmpeg termux-microphone-record)
+        all_deps=(tor opusenc opusdec sox socat openssl ffmpeg termux-microphone-record pulseaudio)
     elif [ $IS_MACOS -eq 1 ]; then
         all_deps=(tor opusenc opusdec sox socat openssl rec play)
     else
@@ -958,9 +950,9 @@ audio_record() {
     local duration="${2:-$CHUNK_DURATION}"
 
     if [ $IS_TERMUX -eq 1 ]; then
-        local tmp_rec="$AUDIO_DIR/tmrec_$(uid).tmp"
+        local tmp_rec="$AUDIO_DIR/tmrec_$(uid).m4a"
         rm -f "$tmp_rec"
-        termux-microphone-record -l "$((duration + 1))" -r "$SAMPLE_RATE" -o "$tmp_rec" &>/dev/null
+        termux-microphone-record -l "$((duration + 1))" -r "$SAMPLE_RATE" -f "$tmp_rec" &>/dev/null
         sleep "$duration"
         termux-microphone-record -q &>/dev/null || true
         sleep 0.5
@@ -985,9 +977,9 @@ start_recording() {
     local _id=$(uid)
 
     if [ $IS_TERMUX -eq 1 ]; then
-        REC_FILE="$AUDIO_DIR/msg_${_id}.tmp"
+        REC_FILE="$AUDIO_DIR/msg_${_id}.m4a"
         rm -f "$REC_FILE"
-        termux-microphone-record -l 120 -r "$SAMPLE_RATE" -o "$REC_FILE" &>/dev/null &
+        termux-microphone-record -l 120 -r "$SAMPLE_RATE" -f "$REC_FILE" &>/dev/null &
         REC_PID=$!
     elif [ $IS_MACOS -eq 1 ]; then
         REC_FILE="$AUDIO_DIR/msg_${_id}.tmp"
@@ -2552,6 +2544,121 @@ settings_chime() {
 }
 
 #=============================================================================
+# ALSA DEVICE SETTINGS
+#=============================================================================
+
+settings_alsa() {
+    [ $IS_MACOS -eq 1 ] && return
+    [ $IS_TERMUX -eq 1 ] && return
+
+    while true; do
+        clear
+        echo -e "\n${BOLD}${CYAN}═══ ALSA Device Settings ═══${NC}\n"
+        echo -e "  Current Capture Device:  ${GREEN}${ALSA_DEV_CAPTURE:-default}${NC}"
+        echo -e "  Current Playback Device: ${GREEN}${ALSA_DEV_PLAYBACK:-default}${NC}\n"
+
+        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Select Capture Device (arecord)"
+        echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Select Playback Device (aplay)"
+        echo -e "  ${BOLD}${WHITE}3${NC} ${CYAN}│${NC} Enter Custom Capture Device Name"
+        echo -e "  ${BOLD}${WHITE}4${NC} ${CYAN}│${NC} Enter Custom Playback Device Name"
+        echo -e "  ${BOLD}${WHITE}5${NC} ${CYAN}│${NC} Reset to default"
+        echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back${NC}"
+        echo ""
+        echo -ne "  ${BOLD}Select: ${NC}"
+        read -r _ac
+
+        case "$_ac" in
+            1)
+                clear
+                echo -e "\n${BOLD}${CYAN}═══ Select ALSA Capture Device ═══${NC}\n"
+                local devs=()
+                local idx=1
+                # Add default first
+                devs+=("default")
+                echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} default"
+                
+                # Parse available devices
+                while IFS= read -r dev; do
+                    if [ "$dev" != "default" ]; then
+                        idx=$((idx + 1))
+                        devs+=("$dev")
+                        echo -e "  ${BOLD}${WHITE}$idx${NC} ${CYAN}│${NC} $dev"
+                    fi
+                done < <(arecord -L 2>/dev/null | grep -E '^[^[:space:]]+$')
+
+                echo ""
+                echo -ne "  ${BOLD}Select device (1-$idx) or 0 to cancel: ${NC}"
+                read -r _dev_sel
+                if [[ "$_dev_sel" =~ ^[0-9]+$ ]] && [ "$_dev_sel" -ge 1 ] && [ "$_dev_sel" -le "$idx" ]; then
+                    ALSA_DEV_CAPTURE="${devs[$((_dev_sel - 1))]}"
+                    save_config
+                    log_ok "Capture device set to: $ALSA_DEV_CAPTURE"
+                    sleep 1.5
+                fi
+                ;;
+            2)
+                clear
+                echo -e "\n${BOLD}${CYAN}═══ Select ALSA Playback Device ═══${NC}\n"
+                local devs=()
+                local idx=1
+                # Add default first
+                devs+=("default")
+                echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} default"
+
+                # Parse available devices
+                while IFS= read -r dev; do
+                    if [ "$dev" != "default" ]; then
+                        idx=$((idx + 1))
+                        devs+=("$dev")
+                        echo -e "  ${BOLD}${WHITE}$idx${NC} ${CYAN}│${NC} $dev"
+                    fi
+                done < <(aplay -L 2>/dev/null | grep -E '^[^[:space:]]+$')
+
+                echo ""
+                echo -ne "  ${BOLD}Select device (1-$idx) or 0 to cancel: ${NC}"
+                read -r _dev_sel
+                if [[ "$_dev_sel" =~ ^[0-9]+$ ]] && [ "$_dev_sel" -ge 1 ] && [ "$_dev_sel" -le "$idx" ]; then
+                    ALSA_DEV_PLAYBACK="${devs[$((_dev_sel - 1))]}"
+                    save_config
+                    log_ok "Playback device set to: $ALSA_DEV_PLAYBACK"
+                    sleep 1.5
+                fi
+                ;;
+            3)
+                echo -ne "\n  ${BOLD}Enter ALSA Capture Device name: ${NC}"
+                read -r _custom_dev
+                if [ -n "$_custom_dev" ]; then
+                    ALSA_DEV_CAPTURE="$_custom_dev"
+                    save_config
+                    log_ok "Capture device set to: $ALSA_DEV_CAPTURE"
+                    sleep 1.5
+                fi
+                ;;
+            4)
+                echo -ne "\n  ${BOLD}Enter ALSA Playback Device name: ${NC}"
+                read -r _custom_dev
+                if [ -n "$_custom_dev" ]; then
+                    ALSA_DEV_PLAYBACK="$_custom_dev"
+                    save_config
+                    log_ok "Playback device set to: $ALSA_DEV_PLAYBACK"
+                    sleep 1.5
+                fi
+                ;;
+            5)
+                ALSA_DEV_CAPTURE="default"
+                ALSA_DEV_PLAYBACK="default"
+                save_config
+                log_ok "ALSA devices reset to default"
+                sleep 1.5
+                ;;
+            0|q|Q)
+                return
+                ;;
+        esac
+    done
+}
+
+#=============================================================================
 # SETTINGS MENU
 #=============================================================================
 
@@ -2613,6 +2720,9 @@ settings_menu() {
         echo -e "  ${BOLD}${WHITE}6${NC} ${CYAN}│${NC} PTT chime ${DIM}(notification sound when remote starts recording)${NC}"
         echo -e "  ${BOLD}${WHITE}7${NC} ${CYAN}│${NC} Tor settings"
         echo -e "  ${BOLD}${WHITE}8${NC} ${CYAN}│${NC} Security"
+        if [ $IS_MACOS -eq 0 ] && [ $IS_TERMUX -eq 0 ]; then
+            echo -e "  ${BOLD}${WHITE}9${NC} ${CYAN}│${NC} ALSA device settings ${DIM}(select microphone/speakers)${NC}"
+        fi
         echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back to main menu${NC}"
         echo ""
         echo -ne "  ${BOLD}Select: ${NC}"
@@ -2693,6 +2803,14 @@ settings_menu() {
             6) settings_chime ;;
             7) settings_tor ;;
             8) settings_security ;;
+            9)
+                if [ $IS_MACOS -eq 0 ] && [ $IS_TERMUX -eq 0 ]; then
+                    settings_alsa
+                else
+                    echo -e "\n  ${RED}ALSA settings are only available on Linux${NC}"
+                    sleep 1
+                fi
+                ;;
             0|q|Q) return ;;
             *)
                 echo -e "\n  ${RED}Invalid choice${NC}"
@@ -3692,6 +3810,15 @@ rm -f "$DATA_DIR/run/"* 2>/dev/null || true
 
 # Load saved config
 load_config
+
+if [ $IS_TERMUX -eq 1 ]; then
+    # Ensure PulseAudio is running so play/rec work on Termux
+    if check_dep pulseaudio; then
+        if ! pulseaudio --check &>/dev/null; then
+            pulseaudio --start --exit-idle-time=-1 &>/dev/null || true
+        fi
+    fi
+fi
 
 # Handle command-line arguments
 case "${1:-}" in
