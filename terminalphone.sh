@@ -935,7 +935,7 @@ audio_record() {
     if [ $IS_TERMUX -eq 1 ]; then
         local tmp_rec="$AUDIO_DIR/tmrec_$(uid).tmp"
         rm -f "$tmp_rec"
-        termux-microphone-record -l "$((duration + 1))" -f "$tmp_rec" &>/dev/null
+        termux-microphone-record -l "$((duration + 1))" -r "$SAMPLE_RATE" -f "$tmp_rec" &>/dev/null
         sleep "$duration"
         termux-microphone-record -q &>/dev/null || true
         sleep 0.5
@@ -960,7 +960,7 @@ start_recording() {
     if [ $IS_TERMUX -eq 1 ]; then
         REC_FILE="$AUDIO_DIR/msg_${_id}.tmp"
         rm -f "$REC_FILE"
-        termux-microphone-record -l 120 -f "$REC_FILE" &>/dev/null &
+        termux-microphone-record -l 120 -r "$SAMPLE_RATE" -f "$REC_FILE" &>/dev/null &
         REC_PID=$!
     elif [ $IS_MACOS -eq 1 ]; then
         REC_FILE="$AUDIO_DIR/msg_${_id}.tmp"
@@ -1031,8 +1031,10 @@ stop_and_send() {
         sleep 0.3  # let file flush
         # Convert m4a → raw PCM
         if [ -s "$REC_FILE" ]; then
-            ffmpeg -y -i "$REC_FILE" -f s16le -ar "$SAMPLE_RATE" -ac 1 \
-                "$raw_file" &>/dev/null || true
+            if ! ffmpeg -y -i "$REC_FILE" -f s16le -ar "$SAMPLE_RATE" -ac 1 \
+                "$raw_file" 2>/dev/null; then
+                log_warn "ffmpeg conversion failed" >&2
+            fi
         fi
         rm -f "$REC_FILE"
     else
@@ -2310,7 +2312,7 @@ test_audio() {
 
     # Step 2: Encode with Opus
     echo -ne "  ${YELLOW}● Encoding with Opus at ${OPUS_BITRATE}kbps...${NC} "
-    local opus_file="$AUDIO_DIR/test_${_tid}.tmp"
+    local opus_file="$AUDIO_DIR/test_o_${_tid}.tmp"
     opusenc --raw --raw-rate "$SAMPLE_RATE" --raw-chan 1 \
         --bitrate "$OPUS_BITRATE" --framesize "$OPUS_FRAMESIZE" \
         --speech --quiet \
